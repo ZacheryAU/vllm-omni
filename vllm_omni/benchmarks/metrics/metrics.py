@@ -1,4 +1,6 @@
+import os
 import warnings
+from collections import defaultdict
 from dataclasses import dataclass
 
 import numpy as np
@@ -33,6 +35,118 @@ class MultiModalsBenchmarkMetrics(BenchmarkMetrics):
     std_audio_underrun_s: float = 0.0
     percentiles_audio_underrun_s: list[tuple[float, float]] = None
     audio_continuity_ok_rate: float = 1.0
+    total_images: int = 0
+    image_throughput: float = 0.0
+    average_pixels_per_image: float = 0.0
+    mean_denoise_step_latency_ms: float = 0.0
+    mean_image_generation_ms: float = 0.0
+    median_image_generation_ms: float = 0.0
+    std_image_generation_ms: float = 0.0
+    percentiles_image_generation_ms: list[tuple[float, float]] = None
+
+
+@dataclass
+class StageBenchmarkMetrics:
+    """Aggregated metrics for one pipeline stage (for printing only)."""
+
+    stage_id: int
+    stage_name: str
+    final_output_type: str
+    total_output: int
+    ttfts: list[float]
+    tpots: list[float]
+    itls: list[float]
+    vllm_ttfts: list[float]
+    vllm_tpots: list[float]
+    vllm_itls: list[float]
+    audio_ttfps: list[float]
+    audio_rtfs: list[float]
+    audio_durations: list[float]
+    audio_frames: list[int]
+    missing_audio_duration_count: int
+    missing_audio_rtf_count: int
+    stage_gen_times_ms: list[float]
+    postprocess_times_ms: list[float]
+    output_unit_type: str
+    output_unit_count: int
+    serving_time_to_first_outputs_ms: list[float]
+    time_per_output_units_ms: list[float]
+    inter_output_latencies_ms: list[float]
+
+
+def _percentile_rows_seconds(
+    values: list[float], selected_percentiles: list[float], *, to_ms: bool
+) -> tuple[float, float, list[tuple[float, float]]]:
+    arr = np.asarray(values, dtype=float)
+    scale = 1000.0 if to_ms else 1.0
+    mean_v = float(np.mean(arr)) * scale
+    median_v = float(np.median(arr)) * scale
+    rows = [(float(p), float(np.percentile(arr, p)) * scale) for p in selected_percentiles]
+    return mean_v, median_v, rows
+
+
+def _p_label(p: float) -> str:
+    pf = float(p)
+    if abs(pf - round(pf)) < 1e-9:
+        return str(int(round(pf)))
+    return str(pf)
+
+
+_STREAMING_OUTPUT_UNIT_TYPES = frozenset(
+    {
+        "text",
+        "stream",
+        "audio",
+    }
+)
+
+
+def _wants_text_ttft(metrics: list[str]) -> bool:
+    return "ttft" in metrics
+
+
+def _wants_text_tpot(metrics: list[str]) -> bool:
+    return "tpot" in metrics or "tpop" in metrics
+
+
+def _wants_text_itl(metrics: list[str]) -> bool:
+    return "itl" in metrics
+
+
+def _wants_stream_ttfc(metrics: list[str]) -> bool:
+    return "ttfc" in metrics
+
+
+def _wants_stream_tpoc(metrics: list[str]) -> bool:
+    return "tpoc" in metrics or "tpop" in metrics
+
+
+def _wants_stream_icl(metrics: list[str]) -> bool:
+    return "icl" in metrics
+
+
+def _should_print_stage_metrics() -> bool:
+    return os.environ.get("VLLM_OMNI_PRINT_STAGE") == "1"
+
+
+def _stage_modality_flags(
+    final_output_type: str,
+    output_unit_type: str,
+) -> tuple[bool, bool, bool, bool, bool]:
+    is_text_stage = final_output_type == "text" or output_unit_type == "text"
+    is_audio_stage = final_output_type == "audio" or output_unit_type == "audio"
+    is_image_stage = final_output_type in {"image", "images"} or output_unit_type == "image"
+    is_video_stage = final_output_type in {"video", "videos"} or output_unit_type == "video"
+    is_internal_stream_stage = (
+        output_unit_type in _STREAMING_OUTPUT_UNIT_TYPES and not is_text_stage and not is_audio_stage
+    )
+    return (
+        is_text_stage,
+        is_audio_stage,
+        is_image_stage,
+        is_video_stage,
+        is_internal_stream_stage,
+    )
 
 
 def print_metrics(
@@ -43,6 +157,9 @@ def print_metrics(
     benchmark_duration,
     goodput_config_dict,
     metrics: MultiModalsBenchmarkMetrics,
+    *,
+    outputs: list[RequestFuncOutput] | None = None,
+    selected_percentiles: list[float] | None = None,
 ):
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
@@ -61,7 +178,19 @@ def print_metrics(
         process_one_metric("e2el", metrics)
     print_text_metrics(task_type, selected_percentile_metrics, metrics)
     if task_type == TaskType.GENERATION:
-        print_audio_metrics(selected_percentile_metrics, metrics)
+        if _has_audio_output(metrics):
+            print_audio_metrics(selected_percentile_metrics, metrics)
+        if _has_image_output(metrics):
+            print_image_metrics(selected_percentiles or [], metrics)
+        if _should_print_stage_metrics() and outputs and selected_percentiles is not None:
+            print("\n{s:{c}^{n}}".format(s=" Stage Benchmark Result ", n=50, c="="))
+            for sm in _build_stage_metrics_from_outputs(outputs):
+                print_stage_metrics(
+                    task_type,
+                    selected_percentile_metrics,
+                    selected_percentiles,
+                    sm,
+                )
     print("=" * 50)
 
 
@@ -79,11 +208,21 @@ def print_text_metrics(task_type, selected_percentile_metrics, metrics: MultiMod
         # No text tokens generated (e.g. pure TTS speech endpoint): per-token
         # latency metrics (ttft/tpot/itl) are undefined, so skip them.
         has_text_output = metrics.total_output > 0
-        for metric in selected_percentile_metrics:
-            if metric == "e2el":
-                continue
-            if not metric.startswith("audio") and has_text_output:
-                process_one_metric(metric, metrics)
+        if has_text_output:
+            if _wants_text_ttft(selected_percentile_metrics):
+                process_one_metric("ttft", metrics)
+            if _wants_text_tpot(selected_percentile_metrics):
+                process_one_metric("tpot", metrics)
+            if _wants_text_itl(selected_percentile_metrics):
+                process_one_metric("itl", metrics)
+
+
+def _has_audio_output(metrics: MultiModalsBenchmarkMetrics) -> bool:
+    return bool(getattr(metrics, "total_audio_duration_s", 0.0) > 0 or getattr(metrics, "total_audio_frames", 0) > 0)
+
+
+def _has_image_output(metrics: MultiModalsBenchmarkMetrics) -> bool:
+    return int(getattr(metrics, "total_images", 0) or 0) > 0
 
 
 def print_audio_metrics(selected_percentile_metrics, metrics: MultiModalsBenchmarkMetrics):
@@ -100,6 +239,21 @@ def print_audio_metrics(selected_percentile_metrics, metrics: MultiModalsBenchma
     for metric in selected_percentile_metrics:
         if metric.startswith("audio"):
             process_one_metric(metric, metrics)
+
+
+def print_image_metrics(selected_percentiles: list[float], metrics: MultiModalsBenchmarkMetrics):
+    print("{s:{c}^{n}}".format(s=" Image Result ", n=50, c="="))
+    print("{:<40} {:<10}".format("Total images generated:", metrics.total_images))
+    print("{:<40} {:<10.2f}".format("Image throughput (img/s):", metrics.image_throughput))
+    print("{:<40} {:<10.2f}".format("Average pixels per image:", metrics.average_pixels_per_image))
+    print("{:<40} {:<10.2f}".format("Mean denoise step latency (ms):", metrics.mean_denoise_step_latency_ms))
+    if metrics.mean_image_generation_ms > 0:
+        print("-----------------Image Generation-----------------")
+        print("{:<40} {:<10.2f}".format("Mean IMAGE_GENERATION (ms):", metrics.mean_image_generation_ms))
+        print("{:<40} {:<10.2f}".format("Median IMAGE_GENERATION (ms):", metrics.median_image_generation_ms))
+        for p, value in metrics.percentiles_image_generation_ms or []:
+            if p in selected_percentiles:
+                print("{:<40} {:<10.2f}".format(f"P{_p_label(p)} IMAGE_GENERATION (ms):", value))
 
 
 def process_one_metric(
@@ -148,6 +302,340 @@ def process_one_metric(
         print(f"{label:<40} {value:<10.2f}")
 
 
+def _print_percentile_metric(
+    header: str,
+    label: str,
+    values: list[float],
+    selected_percentiles: list[float],
+    *,
+    values_are_ms: bool = False,
+    to_ms: bool = True,
+) -> None:
+    if not values:
+        return
+    values_s = [v / 1000.0 for v in values] if values_are_ms else values
+    mean_v, med_v, pcts = _percentile_rows_seconds(values_s, selected_percentiles, to_ms=to_ms)
+    unit_suffix = " (ms)" if to_ms else ""
+    print("{s:{c}^{n}}".format(s=header, n=50, c="-"))
+    print(f"{f'Mean {label}{unit_suffix}:':<40} {mean_v:<10.2f}")
+    print(f"{f'Median {label}{unit_suffix}:':<40} {med_v:<10.2f}")
+    for p, v in pcts:
+        p_str = _p_label(p)
+        print(f"{f'P{p_str} {label}{unit_suffix}:':<40} {v:<10.2f}")
+
+
+def _print_stage_timing(sm: StageBenchmarkMetrics, selected_percentiles: list[float]) -> None:
+    _print_percentile_metric(
+        "Stage Timing",
+        "stage_gen_time",
+        sm.stage_gen_times_ms,
+        selected_percentiles,
+        values_are_ms=True,
+        to_ms=True,
+    )
+    if sm.postprocess_times_ms and any(v > 0 for v in sm.postprocess_times_ms):
+        _print_percentile_metric(
+            "Stage Postprocess",
+            "postprocess",
+            sm.postprocess_times_ms,
+            selected_percentiles,
+            values_are_ms=True,
+            to_ms=True,
+        )
+
+
+def _print_text_stage_metrics(
+    task_type: TaskType,
+    selected_percentile_metrics: list[str],
+    selected_percentiles: list[float],
+    sm: StageBenchmarkMetrics,
+) -> None:
+    print("{s:{c}^{n}}".format(s=" Text Result ", n=50, c="="))
+    print("{:<40} {:<10}".format("Stage generated tokens:", sm.total_output))
+
+    if task_type != TaskType.GENERATION:
+        return
+    if _wants_text_ttft(selected_percentile_metrics):
+        _print_percentile_metric("Serving Time to First Token", "Serving TTFT", sm.ttfts, selected_percentiles)
+        _print_percentile_metric("Time to First Token", "TTFT", sm.vllm_ttfts, selected_percentiles)
+    if _wants_text_tpot(selected_percentile_metrics):
+        _print_percentile_metric(
+            "Time per Output Token (excl. 1st token)",
+            "TPOT",
+            sm.vllm_tpots,
+            selected_percentiles,
+        )
+    if _wants_text_itl(selected_percentile_metrics):
+        _print_percentile_metric("Inter-token Latency", "ITL", sm.vllm_itls, selected_percentiles)
+
+
+def _print_audio_stage_metrics(
+    selected_percentile_metrics: list[str],
+    selected_percentiles: list[float],
+    sm: StageBenchmarkMetrics,
+) -> None:
+    total_duration = float(sum(sm.audio_durations))
+    total_frames = int(sum(sm.audio_frames))
+    print("{s:{c}^{n}}".format(s=" Audio Result ", n=50, c="="))
+    print("{:<40} {:<10.2f}".format("Stage audio duration generated(s):", total_duration))
+    print("{:<40} {:<10}".format("Stage audio frames generated:", total_frames))
+    if defs.AUDIO_TTFP in selected_percentile_metrics:
+        _print_percentile_metric(
+            "Serving Time to First Packet", "Serving AUDIO_TTFP", sm.audio_ttfps, selected_percentiles
+        )
+    if defs.AUDIO_RTF in selected_percentile_metrics:
+        if sm.audio_rtfs:
+            _print_percentile_metric("Real Time Factor", "AUDIO_RTF", sm.audio_rtfs, selected_percentiles, to_ms=False)
+        elif sm.missing_audio_rtf_count > 0:
+            print("{:<40} {:<10}".format("AUDIO_RTF skipped:", "missing stage-local audio duration/sample rate"))
+    if defs.AUDIO_DURATION in selected_percentile_metrics:
+        if sm.audio_durations:
+            _print_percentile_metric(
+                "Audio Duration",
+                "AUDIO_DURATION",
+                sm.audio_durations,
+                selected_percentiles,
+                to_ms=False,
+            )
+        elif sm.missing_audio_duration_count > 0:
+            print("{:<40} {:<10}".format("AUDIO_DURATION skipped:", "missing stage-local audio duration/sample rate"))
+
+
+def _print_image_stage_metrics(
+    selected_percentiles: list[float],
+    sm: StageBenchmarkMetrics,
+) -> None:
+    image_num = sm.output_unit_count if sm.output_unit_type == "image" else 0
+    print("{s:{c}^{n}}".format(s=" Image Result ", n=50, c="="))
+    print("{:<40} {:<10}".format("Total images generated:", image_num))
+    _print_percentile_metric(
+        "Image Generation",
+        "IMAGE_GENERATION",
+        sm.stage_gen_times_ms,
+        selected_percentiles,
+        values_are_ms=True,
+        to_ms=True,
+    )
+
+
+def _print_internal_stream_stage_metrics(
+    selected_percentile_metrics: list[str],
+    selected_percentiles: list[float],
+    sm: StageBenchmarkMetrics,
+) -> None:
+    print("{s:{c}^{n}}".format(s=" Internal Stream Result ", n=50, c="="))
+    if _wants_stream_ttfc(selected_percentile_metrics) and sm.serving_time_to_first_outputs_ms:
+        _print_percentile_metric(
+            "Serving Time to First Chunk",
+            "Serving TTFC",
+            sm.serving_time_to_first_outputs_ms,
+            selected_percentiles,
+            values_are_ms=True,
+            to_ms=True,
+        )
+    if _wants_stream_tpoc(selected_percentile_metrics) and sm.time_per_output_units_ms:
+        _print_percentile_metric(
+            "Time per Output Chunk (excl. 1st chunk)",
+            "TPOP",
+            sm.time_per_output_units_ms,
+            selected_percentiles,
+            values_are_ms=True,
+            to_ms=True,
+        )
+    if _wants_stream_icl(selected_percentile_metrics) and sm.inter_output_latencies_ms:
+        _print_percentile_metric(
+            "Inter-chunk Latency",
+            "ICL",
+            sm.inter_output_latencies_ms,
+            selected_percentiles,
+            values_are_ms=True,
+            to_ms=True,
+        )
+
+
+def print_stage_metrics(
+    task_type: TaskType,
+    selected_percentile_metrics: list[str],
+    selected_percentiles: list[float],
+    sm: StageBenchmarkMetrics,
+):
+    title = f" Stage {sm.stage_id} ({sm.stage_name}) "
+    (
+        is_text_stage,
+        is_audio_stage,
+        is_image_stage,
+        is_video_stage,
+        is_internal_stream_stage,
+    ) = _stage_modality_flags(sm.final_output_type, sm.output_unit_type)
+
+    print("{s:{c}^{n}}".format(s=title, n=50, c="="))
+    if is_image_stage:
+        _print_image_stage_metrics(selected_percentiles, sm)
+        return
+
+    if is_video_stage:
+        return
+
+    _print_stage_timing(sm, selected_percentiles)
+    if is_text_stage:
+        _print_text_stage_metrics(task_type, selected_percentile_metrics, selected_percentiles, sm)
+    elif is_audio_stage:
+        _print_audio_stage_metrics(
+            selected_percentile_metrics,
+            selected_percentiles,
+            sm,
+        )
+    elif is_internal_stream_stage:
+        _print_internal_stream_stage_metrics(selected_percentile_metrics, selected_percentiles, sm)
+
+
+def _build_stage_metrics_from_outputs(
+    outputs: list[RequestFuncOutput],
+) -> list[StageBenchmarkMetrics]:
+    """Aggregate per ``stage_id`` using ``stage_metrics`` snapshots from the client."""
+    buckets: dict[str, list[tuple[RequestFuncOutput, dict]]] = defaultdict(list)
+    for out in outputs:
+        if not getattr(out, "success", False):
+            continue
+        smap = getattr(out, "stage_metrics", None) or {}
+        if not isinstance(smap, dict) or not smap:
+            continue
+        for sid, info in smap.items():
+            if isinstance(info, dict):
+                buckets[str(sid)].append((out, info))
+
+    result: list[StageBenchmarkMetrics] = []
+    for sid in sorted(buckets.keys(), key=lambda x: int(x)):
+        rows = buckets[sid]
+        stage_id_int = int(sid)
+        stage_name = str((rows[0][1] or {}).get("stage_name") or f"stage_{stage_id_int}")
+        final_output_type = str((rows[0][1] or {}).get("final_output_type") or "unknown")
+        output_unit_types = [
+            str((info or {}).get("output_unit_type") or "") for _, info in rows if (info or {}).get("output_unit_type")
+        ]
+        output_unit_type = output_unit_types[0] if output_unit_types else "other"
+
+        is_text_stage, is_audio_stage, _, _, is_internal_stream_stage = _stage_modality_flags(
+            final_output_type, output_unit_type
+        )
+        total_output = 0
+
+        ttfts: list[float] = []
+        tpots: list[float] = []
+        itls: list[float] = []
+        vllm_ttfts: list[float] = []
+        vllm_tpots: list[float] = []
+        vllm_itls: list[float] = []
+        stage_gen_times_ms = [float((info or {}).get("stage_gen_time_ms") or 0.0) for _, info in rows]
+        postprocess_times_ms = [float((info or {}).get("postprocess_time_ms") or 0.0) for _, info in rows]
+        output_unit_count = sum(int((info or {}).get("output_unit_count") or 0) for _, info in rows)
+        inter_output_latencies_ms: list[float] = []
+        serving_time_to_first_outputs_ms: list[float] = []
+        time_per_output_units_ms: list[float] = []
+        if is_text_stage or is_internal_stream_stage:
+            serving_time_to_first_outputs_ms = [
+                float((info or {}).get("serving_time_to_first_output_ms") or 0.0)
+                for _, info in rows
+                if (info or {}).get("serving_time_to_first_output_ms") is not None
+            ]
+            time_per_output_units_ms = [
+                float((info or {}).get("time_per_output_unit_ms") or 0.0)
+                for _, info in rows
+                if int((info or {}).get("output_unit_count") or 0) > 1
+                and (info or {}).get("time_per_output_unit_ms") is not None
+            ]
+            for _, info in rows:
+                values = (info or {}).get("inter_output_latencies_ms")
+                if isinstance(values, list):
+                    inter_output_latencies_ms.extend(float(v or 0.0) for v in values)
+                elif (info or {}).get("inter_output_latency_ms") is not None:
+                    inter_output_latencies_ms.append(float((info or {}).get("inter_output_latency_ms") or 0.0))
+
+        if is_text_stage:
+            for _, info in rows:
+                ttft_ms = float((info or {}).get("serving_time_to_first_output_ms") or 0.0)
+                if ttft_ms > 0:
+                    ttfts.append(ttft_ms / 1000.0)
+                tpot_ms = float((info or {}).get("time_per_output_unit_ms") or 0.0)
+                if int((info or {}).get("output_unit_count") or 0) > 1 and tpot_ms > 0:
+                    tpots.append(tpot_ms / 1000.0)
+                values = (info or {}).get("inter_output_latencies_ms")
+                if isinstance(values, list):
+                    itls.extend(float(v or 0.0) / 1000.0 for v in values)
+                elif (info or {}).get("inter_output_latency_ms") is not None:
+                    itls.append(float((info or {}).get("inter_output_latency_ms") or 0.0) / 1000.0)
+                vllm_ttft_ms = float((info or {}).get("vllm_ttft_ms") or 0.0)
+                if vllm_ttft_ms > 0:
+                    vllm_ttfts.append(vllm_ttft_ms / 1000.0)
+                vllm_tpot_ms = float((info or {}).get("vllm_tpot_ms") or 0.0)
+                if vllm_tpot_ms > 0:
+                    vllm_tpots.append(vllm_tpot_ms / 1000.0)
+                vllm_values = (info or {}).get("vllm_itls_ms")
+                if isinstance(vllm_values, list):
+                    vllm_itls.extend(float(v or 0.0) / 1000.0 for v in vllm_values)
+                elif (info or {}).get("vllm_itl_ms") is not None:
+                    vllm_itls.append(float((info or {}).get("vllm_itl_ms") or 0.0) / 1000.0)
+            total_output = sum(int((info or {}).get("num_tokens_out") or 0) for _, info in rows)
+
+        audio_ttfps: list[float] = []
+        audio_rtfs: list[float] = []
+        audio_durations: list[float] = []
+        audio_frames: list[int] = []
+        missing_audio_duration_count = 0
+        missing_audio_rtf_count = 0
+        if is_audio_stage:
+            for _, info in rows:
+                audio_ttfp_ms = float((info or {}).get("serving_time_to_first_output_ms") or 0.0)
+                if audio_ttfp_ms > 0:
+                    audio_ttfps.append(audio_ttfp_ms / 1000.0)
+
+                frame_count = int((info or {}).get(defs.AUDIO_FRAMES) or 0)
+                if frame_count <= 0 and (info or {}).get("output_unit_type") == "audio":
+                    frame_count = int((info or {}).get("output_unit_count") or 0)
+                audio_frames.append(frame_count)
+
+                duration_s = float((info or {}).get(f"{defs.AUDIO_DURATION}_s") or 0.0)
+                if duration_s > 0:
+                    audio_durations.append(duration_s)
+                else:
+                    missing_audio_duration_count += 1
+
+                rtf = float((info or {}).get(defs.AUDIO_RTF) or 0.0)
+                if rtf > 0:
+                    audio_rtfs.append(rtf)
+                else:
+                    missing_audio_rtf_count += 1
+
+        result.append(
+            StageBenchmarkMetrics(
+                stage_id=stage_id_int,
+                stage_name=stage_name,
+                final_output_type=final_output_type,
+                total_output=total_output,
+                ttfts=ttfts,
+                tpots=tpots,
+                itls=itls,
+                vllm_ttfts=vllm_ttfts,
+                vllm_tpots=vllm_tpots,
+                vllm_itls=vllm_itls,
+                audio_ttfps=audio_ttfps,
+                audio_rtfs=audio_rtfs,
+                audio_durations=audio_durations,
+                audio_frames=audio_frames,
+                missing_audio_duration_count=missing_audio_duration_count,
+                missing_audio_rtf_count=missing_audio_rtf_count,
+                stage_gen_times_ms=stage_gen_times_ms,
+                postprocess_times_ms=postprocess_times_ms,
+                output_unit_type=output_unit_type,
+                output_unit_count=output_unit_count,
+                serving_time_to_first_outputs_ms=serving_time_to_first_outputs_ms,
+                time_per_output_units_ms=time_per_output_units_ms,
+                inter_output_latencies_ms=inter_output_latencies_ms,
+            )
+        )
+    return result
+
+
 def calculate_metrics(
     input_requests: list[SampleRequest],
     outputs: list[RequestFuncOutput],
@@ -187,6 +675,10 @@ def calculate_metrics(
     audio_rtfs: list[float] = []
     audio_duration: list[float] = []
     audio_frames: list[int] = []
+    image_generation_times_ms: list[float] = []
+    denoise_step_latencies_ms: list[float] = []
+    total_images = 0
+    total_image_pixels = 0
     audio_underruns: list[float] = []
     audio_continuity_ok: list[bool] = []
     input_audio_duration = 0.0
@@ -222,6 +714,15 @@ def calculate_metrics(
             audio_rtfs.append(getattr(outputs[i], defs.AUDIO_RTF, 0.0))
             audio_duration.append(getattr(outputs[i], defs.AUDIO_DURATION, 0.0))
             audio_frames.append(getattr(outputs[i], defs.AUDIO_FRAMES, 0.0))
+            image_count = int(getattr(outputs[i], "image_count", 0) or 0)
+            total_images += image_count
+            image_generation_time_ms = float(getattr(outputs[i], "image_generation_time_ms", 0.0) or 0.0)
+            if image_generation_time_ms > 0:
+                image_generation_times_ms.append(image_generation_time_ms)
+            total_image_pixels += int(getattr(outputs[i], "image_pixels", 0) or 0)
+            denoise_step_latency_ms = float(getattr(outputs[i], "denoise_step_latency_ms", 0.0) or 0.0)
+            if denoise_step_latency_ms > 0:
+                denoise_step_latencies_ms.append(denoise_step_latency_ms)
             audio_underruns.append(getattr(outputs[i], f"{defs.AUDIO_UNDERRUN}_s", 0.0))
             audio_continuity_ok.append(bool(getattr(outputs[i], defs.AUDIO_CONTINUITY_OK, True)))
             e2els.append(outputs[i].latency)
@@ -351,6 +852,16 @@ def calculate_metrics(
         std_audio_rtf=np.std(audio_rtfs or 0),
         median_audio_rtf=np.median(audio_rtfs or 0),
         percentiles_audio_rtf=[(p, np.percentile(audio_rtfs or 0, p)) for p in selected_percentiles],
+        total_images=total_images,
+        image_throughput=total_images / dur_s,
+        average_pixels_per_image=(total_image_pixels / total_images) if total_images > 0 else 0.0,
+        mean_denoise_step_latency_ms=np.mean(denoise_step_latencies_ms or 0),
+        mean_image_generation_ms=np.mean(image_generation_times_ms or 0),
+        std_image_generation_ms=np.std(image_generation_times_ms or 0),
+        median_image_generation_ms=np.median(image_generation_times_ms or 0),
+        percentiles_image_generation_ms=[
+            (p, np.percentile(image_generation_times_ms or 0, p)) for p in selected_percentiles
+        ],
         mean_audio_underrun_s=np.mean(audio_underruns or 0),
         std_audio_underrun_s=np.std(audio_underruns or 0),
         median_audio_underrun_s=np.median(audio_underruns or 0),
@@ -380,5 +891,7 @@ def calculate_metrics(
         benchmark_duration,
         goodput_config_dict,
         metrics,
+        outputs=outputs,
+        selected_percentiles=selected_percentiles,
     )
     return metrics, actual_output_lens

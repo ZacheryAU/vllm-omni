@@ -28,6 +28,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from PIL import Image
 from pydantic import BaseModel, Field
 from starlette.datastructures import State
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Route
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
@@ -445,6 +447,17 @@ async def omni_run_server_worker(listen_address, sock, args, client_config=None,
 
         # OMNI: Pass supported_tasks to build_app (required by upstream vLLM)
         app = build_openai_app(args, supported_tasks)
+
+        async def record_request_timestamp(request: Request, call_next):
+            request.state.request_timestamp = time.time()
+            return await call_next(request)
+
+        # Upstream build_app may already build the middleware stack. Insert the
+        # lightweight timestamp middleware directly and rebuild the stack instead
+        # of calling add_middleware(), which Starlette rejects after stack build.
+        app.user_middleware.insert(0, Middleware(BaseHTTPMiddleware, dispatch=record_request_timestamp))
+        app.middleware_stack = app.build_middleware_stack()
+
         # OMNI: Remove upstream routes that we override with omni-specific handlers
         _remove_route_from_app(app, "/v1/chat/completions", {"POST"})
         _remove_route_from_app(app, "/v1/models", {"GET"})  # Remove upstream /v1/models to use omni's handler
@@ -1592,6 +1605,7 @@ async def generate_images(request: ImageGenerationRequest, raw_request: Request)
     Raises:
         HTTPException: For validation errors, missing engine, or generation failures
     """
+    request_timestamp = float(getattr(raw_request.state, "request_timestamp", time.time()))
     # Get engine client (AsyncOmni) from app state
     engine_client, model_name, stage_configs = _get_engine_and_model(raw_request)
 
@@ -1654,6 +1668,7 @@ async def generate_images(request: ImageGenerationRequest, raw_request: Request)
                 extra_body=extra_body,
                 request_id=f"img_gen-{random_uuid()}",
                 raw_request=raw_request,
+                arrival_time=request_timestamp,
             )
             if isinstance(generation_result, ErrorResponse):
                 return JSONResponse(
@@ -1736,6 +1751,7 @@ async def generate_images(request: ImageGenerationRequest, raw_request: Request)
             stage_configs=stage_configs,
             prompt=prompt,
             request_id=request_id,
+            arrival_time=request_timestamp,
         )
 
         if result is None:
@@ -1832,6 +1848,7 @@ async def edit_images(
     """
 
     # 1. get engine and model
+    request_timestamp = float(getattr(raw_request.state, "request_timestamp", time.time()))
     engine_client, model_name, stage_configs = _get_engine_and_model(raw_request)
     if model is not None and model != model_name:
         raise HTTPException(
@@ -2057,6 +2074,7 @@ async def edit_images(
                 extra_body=extra_body,
                 reference_images=ref_b64_list,
                 request_id=request_id,
+                arrival_time=request_timestamp,
                 stream=stream,
                 model=model_name,
                 output_format=output_format,

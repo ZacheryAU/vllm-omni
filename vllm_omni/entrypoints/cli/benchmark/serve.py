@@ -144,6 +144,27 @@ class OmniBenchmarkServingSubcommand(OmniBenchmarkSubcommandBase):
         # Add Daily-Omni specific arguments
         add_daily_omni_cli_args(parser)
         add_seed_tts_cli_args(parser)
+        omni_benchmark_group = parser.add_argument_group("vLLM-Omni Multi-stage Benchmark Options")
+        omni_benchmark_group.add_argument(
+            "--print-stage",
+            action="store_true",
+            default=False,
+            help=(
+                "Print per-stage benchmark metrics for --omni serving when stage metrics are returned by the server. "
+                "Disabled by default. The latency sections follow --percentile-metrics by modality: "
+                "ttft/tpot/itl control text stages, ttfc/tpoc/icl control internal stream stages, "
+                "and tpop controls both text TPOP and internal stream TPOP."
+            ),
+        )
+        omni_benchmark_group.add_argument(
+            "--image-edits-bot-task",
+            type=str,
+            default="think",
+            help=(
+                "Default bot_task form field for --backend openai-image-edits-omni "
+                '(/v1/images/edits). Use --extra-body \'{"bot_task":"..."}\' to override per run.'
+            ),
+        )
 
         for action in parser._actions:
             if action.dest == "dataset_name" and action.choices is not None:
@@ -161,14 +182,20 @@ class OmniBenchmarkServingSubcommand(OmniBenchmarkSubcommandBase):
                 ]
                 if extra:
                     action.choices = list(action.choices) + extra
+            if action.dest == "backend" and action.choices is not None:
+                extra = [c for c in ("openai-image-edits-omni",) if c not in action.choices]
+                if extra:
+                    action.choices = list(action.choices) + extra
 
         # Update help messages for omni-specific features
         for action in parser._actions:
             if action.dest == "percentile_metrics":
                 action.help = (
-                    "Comma-separated list of selected metrics to report percentiles."
-                    "This argument specifies the metrics to report percentiles."
-                    'Allowed metric names are "ttft", "tpot", "itl", "e2el", "audio_ttfp", "audio_rtf". '
+                    "Comma-separated list of selected metrics to report percentiles. "
+                    'For text metrics, "ttft", "tpot", and "itl" affect the global benchmark and text '
+                    'stage metrics. "tpop" also requests text TPOT/TPOP globally and per stage, and internal '
+                    'stream TPOP. "ttfc", "tpoc", and "icl" only affect internal stream stage metrics. '
+                    'Audio metrics include "audio_ttfp", "audio_rtf", "audio_duration", and "audio_underrun".'
                 )
             if action.dest == "random_mm_limit_mm_per_prompt":
                 action.help = (
@@ -202,4 +229,7 @@ class OmniBenchmarkServingSubcommand(OmniBenchmarkSubcommandBase):
             os.environ["SEED_TTS_WER_EVAL"] = "1"
         if getattr(args, "seed_tts_wer_save_items", False):
             os.environ["SEED_TTS_WER_SAVE_ITEMS"] = "1"
+        image_edits_bot_task = getattr(args, "image_edits_bot_task", None)
+        if image_edits_bot_task is not None:
+            os.environ["VLLM_OMNI_IMAGE_EDITS_BOT_TASK"] = image_edits_bot_task
         main(args)

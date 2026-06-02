@@ -527,12 +527,31 @@ class Qwen3OmniMoeForConditionalGeneration(
             return OmniOutput(text_hidden_states=talker_hidden, multimodal_outputs=multimodal_outputs)
         elif self.model_stage == "code2wav":
             audio_tensors = model_outputs
+            sample_rate = self._get_code2wav_sample_rate()
+            # `sr` is the audio sample rate metadata consumed by downstream
+            # audio serving and stage-local audio metrics.
+            sr_tensors = [torch.tensor(sample_rate, dtype=torch.int32) for _ in audio_tensors]
             return OmniOutput(
                 text_hidden_states=None,
-                multimodal_outputs={"model_outputs": [audio_tensor.reshape(1, -1) for audio_tensor in audio_tensors]},
+                multimodal_outputs={
+                    "model_outputs": [audio_tensor.reshape(1, -1) for audio_tensor in audio_tensors],
+                    "sr": sr_tensors,
+                },
             )
 
         return model_outputs
+
+    def _get_code2wav_sample_rate(self) -> int:
+        for attr in ("output_sample_rate", "sample_rate", "audio_sample_rate"):
+            value = getattr(self.code2wav_config, attr, None)
+            if value is not None:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    pass
+        # Qwen audio code2wav outputs are 24 kHz by convention when the HF
+        # config does not expose an explicit output sample-rate field.
+        return 24000
 
     # ==================== Audio Generation ====================
 

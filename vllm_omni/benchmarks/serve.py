@@ -18,4 +18,8 @@ def main(args: argparse.Namespace) -> dict[str, Any]:
         os.environ["SEED_TTS_WER_SAVE_ITEMS"] = "1"
     if getattr(args, "daily_omni_save_eval_items", False):
         os.environ["DAILY_OMNI_SAVE_EVAL_ITEMS"] = "1"
+    if getattr(args, "print_stage", False):
+        os.environ["VLLM_OMNI_PRINT_STAGE"] = "1"
+    else:
+        os.environ.pop("VLLM_OMNI_PRINT_STAGE", None)
     return asyncio.run(main_async(args))

@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import io
 import json
+import mimetypes
 import os
 import random
 import ssl
@@ -12,7 +13,7 @@ import wave
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 import aiohttp
 import pybase64 as base64
@@ -48,9 +49,9 @@ from vllm_omni.benchmarks.data_modules.seed_tts_dataset import (
 )
 from vllm_omni.benchmarks.data_modules.sound_effect_dataset import SoundEffectDataset
 from vllm_omni.benchmarks.data_modules.ttsd_dataset import TTSDDataset
+from vllm_omni.metrics import definitions as defs
 
 _AUDIO_CONTINUITY_THRESHOLD_ENV = "VLLM_OMNI_BENCH_AUDIO_CONTINUITY_THRESHOLD_S"
-_DEFAULT_AUDIO_CONTINUITY_THRESHOLD_S = 0.1
 
 
 def _audio_continuity_threshold_s() -> float:
@@ -62,7 +63,7 @@ def _audio_continuity_threshold_s() -> float:
     """
     raw = os.environ.get(_AUDIO_CONTINUITY_THRESHOLD_ENV)
     if not raw:
-        return _DEFAULT_AUDIO_CONTINUITY_THRESHOLD_S
+        return defs.AUDIO_CONTINUITY_DEFAULT_THRESHOLD_S
     try:
         value = float(raw)
     except ValueError:
@@ -70,9 +71,9 @@ def _audio_continuity_threshold_s() -> float:
             "Invalid %s=%r; using default %.3fs",
             _AUDIO_CONTINUITY_THRESHOLD_ENV,
             raw,
-            _DEFAULT_AUDIO_CONTINUITY_THRESHOLD_S,
+            defs.AUDIO_CONTINUITY_DEFAULT_THRESHOLD_S,
         )
-        return _DEFAULT_AUDIO_CONTINUITY_THRESHOLD_S
+        return defs.AUDIO_CONTINUITY_DEFAULT_THRESHOLD_S
     return max(value, 0.0)
 
 
@@ -352,6 +353,10 @@ class MixRequestFuncOutput(RequestFuncOutput):
     audio_duration: float = 0.0
     audio_frames: int = 0
     audio_rtf: float = 0.0
+    image_count: int = 0
+    image_generation_time_ms: float = 0.0
+    image_pixels: int = 0
+    denoise_step_latency_ms: float = 0.0
     text_latency: float = 0.0
     #: Worst-case streaming-audio underrun (wall-clock seconds the player
     #: would have been starved). Populated by the audio-speech backend; ``0.0``
@@ -366,6 +371,169 @@ class MixRequestFuncOutput(RequestFuncOutput):
     #: Raw PCM s16le mono at 24 kHz for Seed-TTS WER: from ``/v1/audio/speech`` stream or
     #: resampled export after ``openai-chat-omni`` audio deltas.
     tts_output_pcm_bytes: bytes | None = None
+    #: Per-stage snapshot from orchestrator ``metrics["stage_metrics"]`` (merged across SSE chunks).
+    stage_metrics: dict[str, dict] | None = None
+    stage_id: int | None = None
+    final_output_type: str | None = None
+
+
+_IMAGE_EDITS_EXTRA_BODY_FORM_FIELDS = (
+    "negative_prompt",
+    "num_inference_steps",
+    "guidance_scale",
+    "strength",
+    "true_cfg_scale",
+    "seed",
+    "generator_device",
+    "lora",
+    "layers",
+    "resolution",
+    "bot_task",
+    "sys_type",
+    "system_prompt",
+)
+
+
+def _guess_mime_type(path: str) -> str:
+    mime, _ = mimetypes.guess_type(path)
+    return mime or "application/octet-stream"
+
+
+def _iter_image_edit_inputs(value: Any) -> Iterable[Any]:
+    """Yield image references from benchmark multimodal content."""
+    if value is None:
+        return
+    if isinstance(value, list):
+        for item in value:
+            yield from _iter_image_edit_inputs(item)
+        return
+    if not isinstance(value, dict):
+        yield value
+        return
+
+    content_type = value.get("type")
+    if content_type == "image_url":
+        image_url = value.get("image_url")
+        if isinstance(image_url, dict):
+            url = image_url.get("url")
+            if url:
+                yield url
+        elif image_url:
+            yield image_url
+        return
+
+    for key in ("image", "images"):
+        if key in value:
+            yield from _iter_image_edit_inputs(value[key])
+
+
+def _add_image_edit_input_to_form(form: aiohttp.FormData, image_input: Any) -> None:
+    if isinstance(image_input, dict) and "bytes" in image_input:
+        form.add_field(
+            "image",
+            image_input["bytes"],
+            filename="benchmark.png",
+            content_type="image/png",
+        )
+        return
+
+    if isinstance(image_input, str):
+        if image_input.startswith(("data:image", "http://", "https://")):
+            form.add_field("url", image_input)
+            return
+        local_path = image_input.removeprefix("file://")
+        if os.path.exists(local_path):
+            with open(local_path, "rb") as f:
+                image_bytes = f.read()
+            form.add_field(
+                "image",
+                image_bytes,
+                filename=os.path.basename(local_path),
+                content_type=_guess_mime_type(local_path),
+            )
+            return
+
+    raise ValueError(f"Unsupported image edit input: {type(image_input).__name__}")
+
+
+def _add_image_edit_extra_body_to_form(form: aiohttp.FormData, extra_body: dict[str, Any]) -> None:
+    for key in _IMAGE_EDITS_EXTRA_BODY_FORM_FIELDS:
+        value = extra_body.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (dict, list)):
+            form.add_field(key, json.dumps(value))
+        else:
+            form.add_field(key, str(value))
+
+
+def _update_output_stage_metrics_from_payload(
+    output: MixRequestFuncOutput,
+    data: dict[str, Any],
+    *,
+    update_output_tokens: bool = True,
+) -> None:
+    metrics = data.get("metrics")
+    if not isinstance(metrics, dict):
+        return
+    if update_output_tokens:
+        if (num_tokens_out := metrics.get("num_tokens_out")) is not None and int(num_tokens_out) > 0:
+            output.output_tokens = num_tokens_out
+    if isinstance(sid := metrics.get("stage_id"), int):
+        output.stage_id = sid
+    if isinstance(final_output_type := metrics.get("final_output_type"), str):
+        output.final_output_type = final_output_type
+    stage_snapshot = metrics.get("stage_metrics")
+    if isinstance(stage_snapshot, dict):
+        if output.stage_metrics is None:
+            output.stage_metrics = {}
+        output.stage_metrics.update(stage_snapshot)
+
+
+def _image_metrics_from_stage_metrics(metrics: dict[str, Any] | None) -> tuple[int, float, int, float]:
+    if not isinstance(metrics, dict):
+        return 0, 0.0, 0, 0.0
+    stage_snapshot = metrics.get("stage_metrics")
+    if not isinstance(stage_snapshot, dict):
+        return 0, 0.0, 0, 0.0
+    image_count = 0
+    image_generation_ms = 0.0
+    image_pixels = 0
+    denoise_step_latency_ms = 0.0
+    for info in stage_snapshot.values():
+        if not isinstance(info, dict):
+            continue
+        final_output_type = info.get("final_output_type")
+        output_unit_type = info.get("output_unit_type")
+        if final_output_type not in {"image", "images"} and output_unit_type != "image":
+            continue
+        image_count += int(info.get("output_unit_count") or 0)
+        image_generation_ms += float(info.get("stage_gen_time_ms") or 0.0)
+        image_pixels += int(info.get("image_pixels") or 0)
+        denoise_step_latency_ms = max(
+            denoise_step_latency_ms,
+            float(info.get("denoise_step_latency_ms") or 0.0),
+        )
+    return image_count, image_generation_ms, image_pixels, denoise_step_latency_ms
+
+
+def _image_generation_ms_from_content(content: Any) -> float:
+    if not isinstance(content, list):
+        return 0.0
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        stage_durations = item.get("stage_durations")
+        if not isinstance(stage_durations, dict):
+            continue
+        gen_values = [
+            float(value)
+            for key, value in stage_durations.items()
+            if str(key).endswith("_gen_ms") and isinstance(value, (int, float))
+        ]
+        if gen_values:
+            return max(gen_values)
+    return 0.0
 
 
 async def async_request_openai_chat_omni_completions(
@@ -396,6 +564,10 @@ async def async_request_openai_chat_omni_completions(
         },
     }
     _update_payload_common(payload, request_func_input)
+    if os.environ.get("VLLM_OMNI_PRINT_STAGE") == "1":
+        payload["return_stage_metrics"] = True
+    if "image" in (payload.get("modalities") or []):
+        payload["return_stage_metrics"] = True
     # Seed-TTS via chat: voice-clone fields live on the body; ensure audio is streamed.
     if getattr(request_func_input, "seed_tts_row", False):
         if payload.get("modalities") is None:
@@ -448,6 +620,13 @@ async def async_request_openai_chat_omni_completions(
         output.output_tokens = 0
         output.error = ""
         output.success = False
+        output.stage_metrics = {}
+        output.stage_id = None
+        output.final_output_type = None
+        output.image_count = 0
+        output.image_generation_time_ms = 0.0
+        output.image_pixels = 0
+        output.denoise_step_latency_ms = 0.0
         try:
             async with session.post(url=api_url, json=payload, headers=headers) as response:
                 if response.status == 200:
@@ -519,9 +698,29 @@ async def async_request_openai_chat_omni_completions(
                                                     logger.warning("Failed to parse wav audio chunk: %s", ex)
                                             else:
                                                 audio_bytes_buffer.extend(audio_bytes)
+                                    elif modality == "image":
+                                        output.image_count += 1
+                                        content_image_ms = _image_generation_ms_from_content(content)
+                                        if content_image_ms > 0:
+                                            output.image_generation_time_ms += content_image_ms
 
-                                if metrics := data.get("metrics"):
-                                    output.output_tokens = metrics.get("num_tokens_out", 0)
+                                _update_output_stage_metrics_from_payload(output, data)
+                                (
+                                    metrics_image_count,
+                                    metrics_image_ms,
+                                    metrics_image_pixels,
+                                    metrics_denoise_step_ms,
+                                ) = _image_metrics_from_stage_metrics(
+                                    data.get("metrics")
+                                )
+                                if metrics_image_count > output.image_count:
+                                    output.image_count = metrics_image_count
+                                if metrics_image_ms > output.image_generation_time_ms:
+                                    output.image_generation_time_ms = metrics_image_ms
+                                if metrics_image_pixels > output.image_pixels:
+                                    output.image_pixels = metrics_image_pixels
+                                if metrics_denoise_step_ms > output.denoise_step_latency_ms:
+                                    output.denoise_step_latency_ms = metrics_denoise_step_ms
 
                                 if usage := data.get("usage"):
                                     if (pt := usage.get("prompt_tokens")) is not None:
@@ -604,6 +803,143 @@ async def async_request_openai_chat_omni_completions(
             output.error = traceback.format_exc()
             logger.error(f"ERROR: send request failed, reason is: {output.error}")
             break
+
+    if pbar:
+        pbar.update(1)
+    return output
+
+
+async def async_request_openai_image_edits_omni(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: tqdm | None = None,
+) -> MixRequestFuncOutput:
+    """Streaming request to /v1/images/edits for multi-stage image-edit benchmarks."""
+    api_url = request_func_input.api_url
+    _validate_api_url(api_url, "OpenAI Image Edits API", "images/edits")
+
+    extra_body = dict(request_func_input.extra_body or {})
+    model = request_func_input.model_name if request_func_input.model_name else request_func_input.model
+    output = MixRequestFuncOutput()
+    output.prompt_len = request_func_input.prompt_len
+    output.itl = []
+    output.stage_metrics = {}
+    output.output_tokens = 0
+    output.image_count = 0
+    output.image_generation_time_ms = 0.0
+    output.image_pixels = 0
+    output.denoise_step_latency_ms = 0.0
+
+    form = aiohttp.FormData()
+    form.add_field("model", model)
+    form.add_field("prompt", request_func_input.prompt)
+    form.add_field("response_format", "b64_json")
+    form.add_field("output_format", str(extra_body.get("output_format", "png")))
+    form.add_field("stream", "true")
+
+    size = extra_body.get("size")
+    if size is None:
+        width, height = extra_body.get("width"), extra_body.get("height")
+        size = f"{width}x{height}" if width is not None and height is not None else "auto"
+    form.add_field("size", str(size))
+
+    if "bot_task" not in extra_body:
+        bot_task = os.environ.get("VLLM_OMNI_IMAGE_EDITS_BOT_TASK", "think")
+        if bot_task:
+            extra_body["bot_task"] = bot_task
+    _add_image_edit_extra_body_to_form(form, extra_body)
+
+    try:
+        image_inputs = list(_iter_image_edit_inputs(request_func_input.multi_modal_content))
+        if not image_inputs:
+            raise ValueError(
+                "openai-image-edits-omni requires image multimodal content. "
+                "For synthetic inputs, use --dataset-name random-mm with an image bucket."
+            )
+        for image_input in image_inputs:
+            _add_image_edit_input_to_form(form, image_input)
+    except Exception:
+        output.success = False
+        output.error = traceback.format_exc()
+        if pbar:
+            pbar.update(1)
+        return output
+
+    headers = {
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+    }
+    _update_headers_common(headers, request_func_input)
+
+    st = time.perf_counter()
+    output.start_time = st
+    timestamp = st
+    most_recent_text_timestamp = st
+    generated_text = ""
+    try:
+        async with session.post(url=api_url, data=form, headers=headers) as response:
+            if response.status == 200:
+                handler = StreamedResponseHandler()
+                async for chunk_bytes in response.content.iter_any():
+                    if not chunk_bytes:
+                        continue
+                    for message in handler.add_chunk(chunk_bytes):
+                        if type(message) is bytes:
+                            message = message.decode("utf-8")
+                        if message.startswith(":"):
+                            continue
+                        chunk = message.removeprefix("data: ")
+                        if chunk == "[DONE]":
+                            continue
+
+                        timestamp = time.perf_counter()
+                        data = json.loads(chunk)
+                        _update_output_stage_metrics_from_payload(
+                            output,
+                            data,
+                            update_output_tokens=(data.get("type") == "ar_delta"),
+                        )
+
+                        chunk_type = data.get("type")
+                        if chunk_type == "ar_delta":
+                            if output.ttft == 0.0:
+                                output.ttft = timestamp - st
+                            else:
+                                output.itl.append(timestamp - most_recent_text_timestamp)
+                            delta = data.get("delta") or ""
+                            generated_text += delta
+                            most_recent_text_timestamp = timestamp
+                            output.text_latency = timestamp - st
+                        elif chunk_type == "image":
+                            output.image_count += 1
+                            content_image_ms = _image_generation_ms_from_content(data.get("data"))
+                            if content_image_ms > 0:
+                                output.image_generation_time_ms += content_image_ms
+                        (
+                            metrics_image_count,
+                            metrics_image_ms,
+                            metrics_image_pixels,
+                            metrics_denoise_step_ms,
+                        ) = _image_metrics_from_stage_metrics(
+                            data.get("metrics")
+                        )
+                        if metrics_image_count > output.image_count:
+                            output.image_count = metrics_image_count
+                        if metrics_image_ms > output.image_generation_time_ms:
+                            output.image_generation_time_ms = metrics_image_ms
+                        if metrics_image_pixels > output.image_pixels:
+                            output.image_pixels = metrics_image_pixels
+                        if metrics_denoise_step_ms > output.denoise_step_latency_ms:
+                            output.denoise_step_latency_ms = metrics_denoise_step_ms
+                output.latency = timestamp - st
+                output.generated_text = generated_text
+                output.success = True
+            else:
+                output.error = f"HTTP {response.status}: {await response.text()}"
+                output.success = False
+    except Exception:
+        output.success = False
+        output.error = traceback.format_exc()
+        logger.error(f"ERROR: send image edit request failed, reason is: {output.error}")
 
     if pbar:
         pbar.update(1)
@@ -727,6 +1063,10 @@ ASYNC_REQUEST_FUNCS["openai-audio-speech"] = async_request_openai_audio_speech
 if "openai-audio-speech" not in OPENAI_COMPATIBLE_BACKENDS:
     OPENAI_COMPATIBLE_BACKENDS.append("openai-audio-speech")
 
+ASYNC_REQUEST_FUNCS["openai-image-edits-omni"] = async_request_openai_image_edits_omni
+if "openai-image-edits-omni" not in OPENAI_COMPATIBLE_BACKENDS:
+    OPENAI_COMPATIBLE_BACKENDS.append("openai-image-edits-omni")
+
 # Daily-Omni backend for audio-visual reasoning benchmark
 # Reuses openai-chat-omni completions for video+text understanding
 ASYNC_REQUEST_FUNCS["daily-omni"] = async_request_openai_chat_omni_completions
@@ -739,7 +1079,10 @@ from vllm.benchmarks import serve
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.serve import TaskType, calculate_metrics_for_embeddings, get_request
 
-from vllm_omni.benchmarks.metrics.metrics import MultiModalsBenchmarkMetrics, calculate_metrics
+from vllm_omni.benchmarks.metrics.metrics import (
+    MultiModalsBenchmarkMetrics,
+    calculate_metrics,
+)
 
 # ruff: noqa: E402
 
@@ -1019,6 +1362,10 @@ async def benchmark(
             "total_audio_duration_s": metrics.total_audio_duration_s,
             "total_audio_frames": metrics.total_audio_frames,
             "audio_throughput": metrics.audio_throughput,
+            "total_images": metrics.total_images,
+            "image_throughput": metrics.image_throughput,
+            "average_pixels_per_image": metrics.average_pixels_per_image,
+            "mean_denoise_step_latency_ms": metrics.mean_denoise_step_latency_ms,
             "input_lens": [output.prompt_len for output in outputs],
             "output_lens": actual_output_lens,
             "ttfts": [output.ttft for output in outputs],
@@ -1074,21 +1421,34 @@ async def benchmark(
     if rps_change_events:
         result["rps_change_events"] = rps_change_events
 
+    result_percentile_metrics: list[str] = []
+    if "ttft" in selected_percentile_metrics:
+        result_percentile_metrics.append("ttft")
+    if "tpot" in selected_percentile_metrics or "tpop" in selected_percentile_metrics:
+        result_percentile_metrics.append("tpot")
+    if "itl" in selected_percentile_metrics:
+        result_percentile_metrics.append("itl")
+    if "e2el" in selected_percentile_metrics:
+        result_percentile_metrics.append("e2el")
+    for metric in selected_percentile_metrics:
+        if metric.startswith("audio") and metric not in result_percentile_metrics:
+            result_percentile_metrics.append(metric)
+
     def process_one_metric(
         # E.g., "ttft"
         metric_attribute_name: str,
     ):
         # This function prints and adds statistics of the specified
         # metric.
-        if metric_attribute_name not in selected_percentile_metrics:
+        if metric_attribute_name not in result_percentile_metrics:
             return
         # No text tokens generated (e.g. pure TTS speech endpoint): per-token
         # latency metrics (ttft/tpot/itl) are undefined, so skip them.
         is_text_token_metric = not (metric_attribute_name == "e2el" or metric_attribute_name.startswith("audio"))
         if is_text_token_metric and getattr(metrics, "total_output", 0) == 0:
             return
-        is_audio_rtf = metric_attribute_name == "audio_rtf"
-        is_audio_duration_or_underrun = metric_attribute_name in ("audio_duration", "audio_underrun")
+        is_audio_rtf = metric_attribute_name == defs.AUDIO_RTF
+        is_audio_duration_or_underrun = metric_attribute_name in (defs.AUDIO_DURATION, defs.AUDIO_UNDERRUN)
 
         suffix = "_ms"
         if is_audio_duration_or_underrun:
@@ -1107,9 +1467,10 @@ async def benchmark(
             result[f"p{p_word}_{metric_attribute_name}{suffix}"] = value
 
     if task_type == TaskType.GENERATION:
-        for metric in selected_percentile_metrics:
+        for metric in result_percentile_metrics:
             process_one_metric(metric)
     else:
+        result_percentile_metrics.append("e2el")
         process_one_metric("e2el")
 
     if profile:
