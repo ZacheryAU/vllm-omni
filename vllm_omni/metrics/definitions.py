@@ -11,6 +11,8 @@ time-bearing metrics use the ``_s`` suffix (values in seconds), counters use
 ``_total`` (auto-suffixed by the prometheus client), sizes use ``_bytes``.
 """
 
+from typing import Any
+
 # vllm:omni_ avoids upstream's unregister_vllm_metrics() stripping, which
 # removes every collector whose ``_name`` does not start with ``vllm``.
 METRIC_PREFIX = "vllm:omni_"
@@ -195,21 +197,22 @@ def compute_audio_rtf(stage_gen_time_s: float, audio_duration_s: float) -> float
 # at runtime so this default only kicks in when the field is missing.
 DEFAULT_AUDIO_SAMPLE_RATE = 24000
 
-_SAMPLE_RATE_KEYS = ("audio_sample_rate", "sample_rate", "sampling_rate", "sr")
+_SAMPLE_RATE_KEYS = ("output_sample_rate", "audio_sample_rate", "sample_rate", "sampling_rate", "sr")
 
 
-def resolve_audio_sample_rate(multimodal_output: dict | None) -> int:
-    """Extract audio sample_rate from a multimodal_output dict, with fallbacks.
+de(source: dict[str, Any] | Any | None) -> int:
+    """Extract audio sample_rate from a dict or config object, with fallbacks.
 
     Tries the same key chain as serving_chat.py's audio response path so
     /metrics audio_duration_s = audio_frames / sample_rate stays consistent
-    with what the OpenAI streaming endpoint reports back to clients.
+    with what the OpenAI streaming endpoint reports back to clients. Also
+    accepts config objects that expose the same values as attributes.
     Returns DEFAULT_AUDIO_SAMPLE_RATE when no usable value is present.
     """
-    if not multimodal_output:
+    if not source:
         return DEFAULT_AUDIO_SAMPLE_RATE
     for key in _SAMPLE_RATE_KEYS:
-        raw = multimodal_output.get(key)
+        raw = source.get(key) if isinstance(source, dict) else getattr(source, key, None)
         if raw is None:
             continue
         try:
