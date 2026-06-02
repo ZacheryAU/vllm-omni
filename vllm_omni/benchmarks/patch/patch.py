@@ -710,9 +710,7 @@ async def async_request_openai_chat_omni_completions(
                                     metrics_image_ms,
                                     metrics_image_pixels,
                                     metrics_denoise_step_ms,
-                                ) = _image_metrics_from_stage_metrics(
-                                    data.get("metrics")
-                                )
+                                ) = _image_metrics_from_stage_metrics(data.get("metrics"))
                                 if metrics_image_count > output.image_count:
                                     output.image_count = metrics_image_count
                                 if metrics_image_ms > output.image_generation_time_ms:
@@ -919,9 +917,7 @@ async def async_request_openai_image_edits_omni(
                             metrics_image_ms,
                             metrics_image_pixels,
                             metrics_denoise_step_ms,
-                        ) = _image_metrics_from_stage_metrics(
-                            data.get("metrics")
-                        )
+                        ) = _image_metrics_from_stage_metrics(data.get("metrics"))
                         if metrics_image_count > output.image_count:
                             output.image_count = metrics_image_count
                         if metrics_image_ms > output.image_generation_time_ms:

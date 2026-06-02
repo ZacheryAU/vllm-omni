@@ -36,6 +36,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_omni.data_entry_keys import Embeddings, HiddenStates, Ids, OmniPayload, OmniPayloadMeta
+from vllm_omni.metrics import definitions as defs
 from vllm_omni.model_executor.custom_process_mixin import CustomProcessMixin
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.model_executor.models.qwen3_omni.qwen3_omni_moe_thinker import (
@@ -551,7 +552,7 @@ class Qwen3OmniMoeForConditionalGeneration(
                     pass
         # Qwen audio code2wav outputs are 24 kHz by convention when the HF
         # config does not expose an explicit output sample-rate field.
-        return 24000
+        return defs.DEFAULT_AUDIO_SAMPLE_RATE
 
     # ==================== Audio Generation ====================
 
