@@ -200,7 +200,7 @@ DEFAULT_AUDIO_SAMPLE_RATE = 24000
 _SAMPLE_RATE_KEYS = ("output_sample_rate", "audio_sample_rate", "sample_rate", "sampling_rate", "sr")
 
 
-de(source: dict[str, Any] | Any | None) -> int:
+def resolve_audio_sample_rate(source: dict[str, Any] | Any | None) -> int:
     """Extract audio sample_rate from a dict or config object, with fallbacks.
 
     Tries the same key chain as serving_chat.py's audio response path so
