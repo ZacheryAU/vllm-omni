@@ -218,8 +218,12 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
 
     @staticmethod
     def _truthy_extra_body_flag(request: Any, key: str) -> bool:
-        extra_body = getattr(request, "extra_body", None) or {}
-        model_extra = getattr(request, "model_extra", None) or {}
+        if isinstance(request, dict):
+            extra_body = request
+            model_extra = {}
+        else:
+            extra_body = getattr(request, "extra_body", None) or {}
+            model_extra = getattr(request, "model_extra", None) or {}
         value = extra_body.get(key, model_extra.get(key))
         if isinstance(value, str):
             return value.lower() in {"1", "true", "yes", "on"}
@@ -2785,6 +2789,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         engine, gen_prompt, gen_params, pil_images = prepared
         if extra_body is None:
             extra_body = {}
+        return_stage_metrics = self._truthy_extra_body_flag(extra_body, "return_stage_metrics")
 
         if isinstance(engine, AsyncOmni):
             diffusion_engine = cast(AsyncOmni, engine)
@@ -2832,6 +2837,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                     output_format=output_format,
                     output_compression=output_compression,
                     size=size,
+                    return_stage_metrics=return_stage_metrics,
                     raw_request=raw_request,
                 )
 
@@ -2887,6 +2893,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
         output_format: str,
         output_compression: int,
         size: str,
+        return_stage_metrics: bool,
         raw_request: Request | None = None,
     ) -> AsyncIterator[str]:
         """Yield image edit SSE chunks from multi-stage diffusion outputs."""
@@ -2896,7 +2903,7 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
             async for output in result_generator:
                 final_output_type = getattr(output, "final_output_type", None)
                 stage_id = getattr(output, "stage_id", None)
-                metrics = getattr(output, "metrics", None)
+                metrics = getattr(output, "metrics", None) if return_stage_metrics else None
                 if final_output_type == "text" and stage_id == 0:
                     request_output = output.request_output
                     for completion in request_output.outputs:

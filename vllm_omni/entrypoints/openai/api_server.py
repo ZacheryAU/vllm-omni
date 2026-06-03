@@ -1842,6 +1842,7 @@ async def edit_images(
     bot_task: str | None = Form(None),
     sys_type: str | None = Form(None),
     system_prompt: str | None = Form(None),
+    return_stage_metrics: bool | None = Form(None),
 ) -> ImageGenerationResponse:
     """
     OpenAI-compatible image edit endpoint.
@@ -2067,6 +2068,8 @@ async def edit_images(
                 extra_body["sys_type"] = sys_type
             if system_prompt is not None:
                 extra_body["system_prompt"] = system_prompt
+            if return_stage_metrics is not None:
+                extra_body["return_stage_metrics"] = return_stage_metrics
 
             prompt_text = prompt.get("prompt", "")
             generation_result = await chat_handler.generate_diffusion_images(

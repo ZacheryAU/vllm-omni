@@ -154,6 +154,8 @@ def add_omni_benchmark_cli_args(parser: argparse.ArgumentParser) -> None:
             '(/v1/images/edits). Use --extra-body \'{"bot_task":"..."}\' to override per run.'
         ),
     )
+
+
 _OMNI_BENCH_DATASET_CHOICES = (
     "daily-omni",
     "seed-tts",

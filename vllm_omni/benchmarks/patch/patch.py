@@ -52,6 +52,31 @@ from vllm_omni.benchmarks.data_modules.ttsd_dataset import TTSDDataset
 from vllm_omni.metrics import definitions as defs
 
 _AUDIO_CONTINUITY_THRESHOLD_ENV = "VLLM_OMNI_BENCH_AUDIO_CONTINUITY_THRESHOLD_S"
+RETURN_STAGE_METRICS_FIELD = "return_stage_metrics"
+_IMAGE_STAGE_METRICS_BACKENDS = frozenset({"openai-image-edits-omni"})
+
+
+def maybe_enable_stage_metrics(extra_body: dict[str, Any] | None, *, enabled: bool) -> dict[str, Any] | None:
+    """Return extra_body with stage-metric opt-in when benchmark metrics need it."""
+    if not enabled:
+        return extra_body
+    body = dict(extra_body or {})
+    body.setdefault(RETURN_STAGE_METRICS_FIELD, True)
+    return body
+
+
+def should_request_stage_metrics(args: Any) -> bool:
+    """Whether this benchmark run needs server-side stage metrics in responses."""
+    if getattr(args, "print_stage", False):
+        return True
+
+    backend = getattr(args, "backend", None)
+    if backend in _IMAGE_STAGE_METRICS_BACKENDS:
+        return True
+
+    extra_body = getattr(args, "extra_body", None) or {}
+    modalities = extra_body.get("modalities") if isinstance(extra_body, dict) else None
+    return backend == "openai-chat-omni" and "image" in (modalities or [])
 
 
 def _audio_continuity_threshold_s() -> float:
@@ -391,6 +416,7 @@ _IMAGE_EDITS_EXTRA_BODY_FORM_FIELDS = (
     "bot_task",
     "sys_type",
     "system_prompt",
+    RETURN_STAGE_METRICS_FIELD,
 )
 
 
@@ -564,10 +590,6 @@ async def async_request_openai_chat_omni_completions(
         },
     }
     _update_payload_common(payload, request_func_input)
-    if os.environ.get("VLLM_OMNI_PRINT_STAGE") == "1":
-        payload["return_stage_metrics"] = True
-    if "image" in (payload.get("modalities") or []):
-        payload["return_stage_metrics"] = True
     # Seed-TTS via chat: voice-clone fields live on the body; ensure audio is streamed.
     if getattr(request_func_input, "seed_tts_row", False):
         if payload.get("modalities") is None:
@@ -904,7 +926,8 @@ async def async_request_openai_image_edits_omni(
                             most_recent_text_timestamp = timestamp
                             output.text_latency = timestamp - st
                         elif chunk_type == "image":
-                            output.image_count += 1
+                            image_data = data.get("data")
+                            output.image_count += len(image_data) if isinstance(image_data, list) else 1
                             content_image_ms = _image_generation_ms_from_content(data.get("data"))
                             if content_image_ms > 0:
                                 output.image_generation_time_ms += content_image_ms

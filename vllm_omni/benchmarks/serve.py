@@ -9,6 +9,7 @@ from vllm.benchmarks.serve import main_async
 # This monkey-patches vllm.benchmarks.datasets.get_samples before it's used
 # Must be imported before any vllm.benchmarks module usage
 import vllm_omni.benchmarks.patch.patch  # noqa: F401
+from vllm_omni.benchmarks.patch.patch import maybe_enable_stage_metrics, should_request_stage_metrics
 
 
 def main(args: argparse.Namespace) -> dict[str, Any]:
@@ -22,4 +23,8 @@ def main(args: argparse.Namespace) -> dict[str, Any]:
         os.environ["VLLM_OMNI_PRINT_STAGE"] = "1"
     else:
         os.environ.pop("VLLM_OMNI_PRINT_STAGE", None)
+    args.extra_body = maybe_enable_stage_metrics(
+        getattr(args, "extra_body", None),
+        enabled=should_request_stage_metrics(args),
+    )
     return asyncio.run(main_async(args))
