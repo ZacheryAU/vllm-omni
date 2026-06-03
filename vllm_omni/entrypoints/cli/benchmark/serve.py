@@ -154,6 +154,33 @@ def add_omni_benchmark_cli_args(parser: argparse.ArgumentParser) -> None:
             '(/v1/images/edits). Use --extra-body \'{"bot_task":"..."}\' to override per run.'
         ),
     )
+_OMNI_BENCH_DATASET_CHOICES = (
+    "daily-omni",
+    "seed-tts",
+    "seed-tts-text",
+    "seed-tts-design",
+    "ttsd",
+    "sound-effect",
+)
+
+
+def _extend_omni_dataset_name_choices(parser: argparse.ArgumentParser) -> None:
+    """Append omni benchmark dataset names to --dataset-name choices.
+
+    TrackingArgumentParser keeps a shadow parser for explicit-arg tracking; both
+    parsers must list the same choices or parse_args rejects valid omni values.
+    """
+    parsers = [parser]
+    shadow = getattr(parser, "_shadow", None)
+    if shadow is not None:
+        parsers.append(shadow)
+
+    for p in parsers:
+        for action in p._actions:
+            if action.dest == "dataset_name" and action.choices is not None:
+                extra = [c for c in _OMNI_BENCH_DATASET_CHOICES if c not in action.choices]
+                if extra:
+                    action.choices = list(action.choices) + extra
 
 
 class OmniBenchmarkServingSubcommand(OmniBenchmarkSubcommandBase):
@@ -191,6 +218,7 @@ class OmniBenchmarkServingSubcommand(OmniBenchmarkSubcommandBase):
                 extra = [c for c in ("openai-image-edits-omni",) if c not in action.choices]
                 if extra:
                     action.choices = list(action.choices) + extra
+        _extend_omni_dataset_name_choices(parser)
 
         # Update help messages for omni-specific features
         for action in parser._actions:
