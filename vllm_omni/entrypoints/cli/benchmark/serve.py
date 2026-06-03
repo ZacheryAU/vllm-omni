@@ -131,6 +131,31 @@ def add_seed_tts_cli_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_omni_benchmark_cli_args(parser: argparse.ArgumentParser) -> None:
+    """Add vLLM-Omni specific serving benchmark options."""
+    group = parser.add_argument_group("vLLM-Omni Multi-stage Benchmark Options")
+    group.add_argument(
+        "--print-stage",
+        action="store_true",
+        default=False,
+        help=(
+            "Print per-stage benchmark metrics for --omni serving when stage metrics are returned by the server. "
+            "Disabled by default. The latency sections follow --percentile-metrics by modality: "
+            "ttft/tpot/itl control text stages, ttfc/tpoc/icl control internal stream stages, "
+            "and tpop controls both text TPOP and internal stream TPOP."
+        ),
+    )
+    group.add_argument(
+        "--image-edits-bot-task",
+        type=str,
+        default="think",
+        help=(
+            "Default bot_task form field for --backend openai-image-edits-omni "
+            '(/v1/images/edits). Use --extra-body \'{"bot_task":"..."}\' to override per run.'
+        ),
+    )
+
+
 class OmniBenchmarkServingSubcommand(OmniBenchmarkSubcommandBase):
     """The `serve` subcommand for vllm bench."""
 
@@ -144,27 +169,7 @@ class OmniBenchmarkServingSubcommand(OmniBenchmarkSubcommandBase):
         # Add Daily-Omni specific arguments
         add_daily_omni_cli_args(parser)
         add_seed_tts_cli_args(parser)
-        omni_benchmark_group = parser.add_argument_group("vLLM-Omni Multi-stage Benchmark Options")
-        omni_benchmark_group.add_argument(
-            "--print-stage",
-            action="store_true",
-            default=False,
-            help=(
-                "Print per-stage benchmark metrics for --omni serving when stage metrics are returned by the server. "
-                "Disabled by default. The latency sections follow --percentile-metrics by modality: "
-                "ttft/tpot/itl control text stages, ttfc/tpoc/icl control internal stream stages, "
-                "and tpop controls both text TPOP and internal stream TPOP."
-            ),
-        )
-        omni_benchmark_group.add_argument(
-            "--image-edits-bot-task",
-            type=str,
-            default="think",
-            help=(
-                "Default bot_task form field for --backend openai-image-edits-omni "
-                '(/v1/images/edits). Use --extra-body \'{"bot_task":"..."}\' to override per run.'
-            ),
-        )
+        add_omni_benchmark_cli_args(parser)
 
         for action in parser._actions:
             if action.dest == "dataset_name" and action.choices is not None:
@@ -231,5 +236,7 @@ class OmniBenchmarkServingSubcommand(OmniBenchmarkSubcommandBase):
             os.environ["SEED_TTS_WER_SAVE_ITEMS"] = "1"
         image_edits_bot_task = getattr(args, "image_edits_bot_task", None)
         if image_edits_bot_task is not None:
-            os.environ["VLLM_OMNI_IMAGE_EDITS_BOT_TASK"] = image_edits_bot_task
+            extra_body = dict(getattr(args, "extra_body", None) or {})
+            extra_body.setdefault("bot_task", image_edits_bot_task)
+            args.extra_body = extra_body
         main(args)

@@ -841,10 +841,6 @@ async def async_request_openai_image_edits_omni(
         size = f"{width}x{height}" if width is not None and height is not None else "auto"
     form.add_field("size", str(size))
 
-    if "bot_task" not in extra_body:
-        bot_task = os.environ.get("VLLM_OMNI_IMAGE_EDITS_BOT_TASK", "think")
-        if bot_task:
-            extra_body["bot_task"] = bot_task
     _add_image_edit_extra_body_to_form(form, extra_body)
 
     try:
