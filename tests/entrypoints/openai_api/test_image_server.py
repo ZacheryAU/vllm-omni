@@ -815,7 +815,9 @@ def test_image_edits_streaming_returns_ar_delta_then_image(streaming_image_edit_
 
 
 def test_image_edits_streaming_ar_delta_chunks_include_index(streaming_image_edit_client):
-    async def generate_multi_output_delta(prompt, request_id, sampling_params=None, sampling_params_list=None, **kwargs):
+    async def generate_multi_output_delta(
+        prompt, request_id, sampling_params=None, sampling_params_list=None, **kwargs
+    ):
         yield MockStageResult(stage_id=0, final_output_type="text", texts=["first", "second"])
         yield MockStageResult(
             stage_id=1,
