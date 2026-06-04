@@ -479,6 +479,7 @@ async def omni_run_server_worker(listen_address, sock, args, client_config=None,
                 vllm_config.parallel_config._api_process_rank,
                 listen_address,
             )
+
         class _TimestampMiddleware:
             """Pure-ASGI outermost wrapper that stamps HTTP request arrival time.
 
