@@ -533,12 +533,12 @@ def _image_metrics_from_stage_metrics(metrics: dict[str, Any] | None) -> tuple[i
         output_unit_type = info.get("output_unit_type")
         if final_output_type not in {"image", "images"} and output_unit_type != "image":
             continue
-        image_count += int(info.get("output_unit_count") or 0)
-        image_generation_ms += float(info.get("stage_gen_time_ms") or 0.0)
-        image_pixels += int(info.get("image_pixels") or 0)
+        image_count += int(info.get(defs.OUTPUT_UNIT_COUNT) or 0)
+        image_generation_ms += float(info.get(defs.STAGE_GEN_TIME_MS) or 0.0)
+        image_pixels += int(info.get(defs.IMAGE_PIXELS) or 0)
         denoise_step_latency_ms = max(
             denoise_step_latency_ms,
-            float(info.get("denoise_step_latency_ms") or 0.0),
+            float(info.get(defs.DENOISE_STEP_LATENCY_MS) or 0.0),
         )
     return image_count, image_generation_ms, image_pixels, denoise_step_latency_ms
 
@@ -1374,13 +1374,13 @@ async def benchmark(
             "request_goodput": metrics.request_goodput if goodput_config_dict else None,
             "output_throughput": metrics.output_throughput,
             "total_token_throughput": metrics.total_token_throughput,
-            "total_audio_duration_s": metrics.total_audio_duration_s,
-            "total_audio_frames": metrics.total_audio_frames,
-            "audio_throughput": metrics.audio_throughput,
-            "total_images": metrics.total_images,
-            "image_throughput": metrics.image_throughput,
-            "average_pixels_per_image": metrics.average_pixels_per_image,
-            "mean_denoise_step_latency_ms": metrics.mean_denoise_step_latency_ms,
+            defs.TOTAL_AUDIO_DURATION_S: getattr(metrics, defs.TOTAL_AUDIO_DURATION_S),
+            defs.TOTAL_AUDIO_FRAMES: getattr(metrics, defs.TOTAL_AUDIO_FRAMES),
+            defs.AUDIO_THROUGHPUT: getattr(metrics, defs.AUDIO_THROUGHPUT),
+            defs.TOTAL_IMAGES: getattr(metrics, defs.TOTAL_IMAGES),
+            defs.IMAGE_THROUGHPUT: getattr(metrics, defs.IMAGE_THROUGHPUT),
+            defs.AVERAGE_PIXELS_PER_IMAGE: getattr(metrics, defs.AVERAGE_PIXELS_PER_IMAGE),
+            defs.MEAN_DENOISE_STEP_LATENCY_MS: getattr(metrics, defs.MEAN_DENOISE_STEP_LATENCY_MS),
             "input_lens": [output.prompt_len for output in outputs],
             "output_lens": actual_output_lens,
             "ttfts": [output.ttft for output in outputs],

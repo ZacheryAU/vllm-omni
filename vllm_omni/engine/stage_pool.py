@@ -530,8 +530,8 @@ class StagePool:
         image_pixels = self._count_image_pixels(request_outputs) if output_unit_type == "image" else 0
         num_inference_steps = self._coerce_int_scalar(getattr(sampling_params, "num_inference_steps", None))
         denoise_step_latency_ms = (
-            stage_gen_time_ms / float(num_inference_steps)
-            if output_unit_type == "image" and num_inference_steps > 0
+            defs.compute_denoise_step_latency(stage_gen_time_ms, num_inference_steps)
+            if output_unit_type == "image"
             else 0.0
         )
         has_output_timestamps = bool(output_timestamps)

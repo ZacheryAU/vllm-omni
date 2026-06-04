@@ -430,8 +430,8 @@ class OrchestratorAggregator:
             if stage_event is not None and stage_event.final_output_type == "text":
                 output_to_yield.metrics.update(
                     {
-                        "num_tokens_in": stage_event.num_tokens_in,
-                        "num_tokens_out": stage_event.num_tokens_out,
+                        defs.NUM_TOKENS_IN: stage_event.num_tokens_in,
+                        defs.NUM_TOKENS_OUT: stage_event.num_tokens_out,
                         "stage_id": stage_event.stage_id,
                         "final_output_type": stage_event.final_output_type,
                     }
@@ -464,83 +464,86 @@ class OrchestratorAggregator:
             current = {
                 "stage_id": sid,
                 "final_output_type": evt.final_output_type,
-                "num_tokens_in": int(evt.num_tokens_in),
-                "num_tokens_out": int(evt.num_tokens_out),
-                "stage_gen_time_ms": float(evt.stage_gen_time_ms),
-                "postprocess_time_ms": float(evt.postprocess_time_ms),
+                defs.NUM_TOKENS_IN: int(evt.num_tokens_in),
+                defs.NUM_TOKENS_OUT: int(evt.num_tokens_out),
+                defs.STAGE_GEN_TIME_MS: float(evt.stage_gen_time_ms),
+                defs.POSTPROCESS_TIME_MS: float(evt.postprocess_time_ms),
                 defs.AUDIO_FRAMES: int(evt.audio_generated_frames),
-                "audio_sample_rate": int(evt.audio_sample_rate),
+                defs.AUDIO_SAMPLE_RATE: int(evt.audio_sample_rate),
                 f"{defs.AUDIO_DURATION}_s": float(evt.audio_duration_s),
                 defs.AUDIO_RTF: float(evt.audio_rtf),
-                "image_pixels": int(evt.image_pixels),
-                "denoise_step_latency_ms": float(evt.denoise_step_latency_ms),
+                defs.IMAGE_PIXELS: int(evt.image_pixels),
+                defs.DENOISE_STEP_LATENCY_MS: float(evt.denoise_step_latency_ms),
                 "output_unit_type": evt.output_unit_type,
-                "output_unit_count": int(evt.output_unit_count),
-                "serving_time_to_first_output_ms": float(evt.serving_time_to_first_output_ms),
-                "time_per_output_unit_ms": float(evt.time_per_output_unit_ms),
-                "inter_output_latency_ms": float(evt.inter_output_latency_ms),
-                "inter_output_latencies_ms": list(evt.inter_output_latencies_ms or []),
-                "vllm_ttft_ms": float(evt.vllm_ttft_ms),
-                "vllm_tpot_ms": float(evt.vllm_tpot_ms),
-                "vllm_itl_ms": float(evt.vllm_itl_ms),
-                "vllm_itls_ms": list(evt.vllm_itls_ms or []),
+                defs.OUTPUT_UNIT_COUNT: int(evt.output_unit_count),
+                defs.SERVING_TIME_TO_FIRST_OUTPUT_MS: float(evt.serving_time_to_first_output_ms),
+                defs.TIME_PER_OUTPUT_UNIT_MS: float(evt.time_per_output_unit_ms),
+                defs.INTER_OUTPUT_LATENCY_MS: float(evt.inter_output_latency_ms),
+                defs.INTER_OUTPUT_LATENCIES_MS: list(evt.inter_output_latencies_ms or []),
+                defs.VLLM_TTFT_MS: float(evt.vllm_ttft_ms),
+                defs.VLLM_TPOT_MS: float(evt.vllm_tpot_ms),
+                defs.VLLM_ITL_MS: float(evt.vllm_itl_ms),
+                defs.VLLM_ITLS_MS: list(evt.vllm_itls_ms or []),
             }
             return current
 
-        current["num_tokens_in"] = int(current.get("num_tokens_in", 0)) + int(evt.num_tokens_in)
-        current["num_tokens_out"] = int(current.get("num_tokens_out", 0)) + int(evt.num_tokens_out)
-        current["stage_gen_time_ms"] = float(current.get("stage_gen_time_ms", 0.0)) + float(evt.stage_gen_time_ms)
-        current["postprocess_time_ms"] = float(current.get("postprocess_time_ms", 0.0)) + float(evt.postprocess_time_ms)
+        current[defs.NUM_TOKENS_IN] = int(current.get(defs.NUM_TOKENS_IN, 0)) + int(evt.num_tokens_in)
+        current[defs.NUM_TOKENS_OUT] = int(current.get(defs.NUM_TOKENS_OUT, 0)) + int(evt.num_tokens_out)
+        current[defs.STAGE_GEN_TIME_MS] = float(current.get(defs.STAGE_GEN_TIME_MS, 0.0)) + float(evt.stage_gen_time_ms)
+        current[defs.POSTPROCESS_TIME_MS] = float(current.get(defs.POSTPROCESS_TIME_MS, 0.0)) + float(
+            evt.postprocess_time_ms
+        )
         current[defs.AUDIO_FRAMES] = int(current.get(defs.AUDIO_FRAMES, 0)) + int(evt.audio_generated_frames)
-        if int(current.get("audio_sample_rate", 0)) <= 0 and int(evt.audio_sample_rate) > 0:
-            current["audio_sample_rate"] = int(evt.audio_sample_rate)
+        if int(current.get(defs.AUDIO_SAMPLE_RATE, 0)) <= 0 and int(evt.audio_sample_rate) > 0:
+            current[defs.AUDIO_SAMPLE_RATE] = int(evt.audio_sample_rate)
         current[f"{defs.AUDIO_DURATION}_s"] = float(current.get(f"{defs.AUDIO_DURATION}_s", 0.0)) + float(
             evt.audio_duration_s
         )
-        current["image_pixels"] = int(current.get("image_pixels", 0)) + int(evt.image_pixels)
+        current[defs.IMAGE_PIXELS] = int(current.get(defs.IMAGE_PIXELS, 0)) + int(evt.image_pixels)
         denoise_step_latency_ms = float(evt.denoise_step_latency_ms)
         if denoise_step_latency_ms > 0:
-            current["denoise_step_latency_ms"] = denoise_step_latency_ms
-        current["output_unit_count"] = int(current.get("output_unit_count", 0)) + int(evt.output_unit_count)
+            current[defs.DENOISE_STEP_LATENCY_MS] = denoise_step_latency_ms
+        current[defs.OUTPUT_UNIT_COUNT] = int(current.get(defs.OUTPUT_UNIT_COUNT, 0)) + int(evt.output_unit_count)
 
         first_output_ms = float(evt.serving_time_to_first_output_ms)
-        current_first_output_ms = float(current.get("serving_time_to_first_output_ms", 0.0))
+        current_first_output_ms = float(current.get(defs.SERVING_TIME_TO_FIRST_OUTPUT_MS, 0.0))
         if current_first_output_ms <= 0 < first_output_ms:
-            current["serving_time_to_first_output_ms"] = first_output_ms
+            current[defs.SERVING_TIME_TO_FIRST_OUTPUT_MS] = first_output_ms
 
         if evt.output_unit_type:
             current["output_unit_type"] = evt.output_unit_type
         if evt.final_output_type:
             current["final_output_type"] = evt.final_output_type
 
-        inter_latencies = list(current.get("inter_output_latencies_ms") or [])
+        inter_latencies = list(current.get(defs.INTER_OUTPUT_LATENCIES_MS) or [])
         inter_latencies.extend(list(evt.inter_output_latencies_ms or []))
-        current["inter_output_latencies_ms"] = inter_latencies
-        current["inter_output_latency_ms"] = (
+        current[defs.INTER_OUTPUT_LATENCIES_MS] = inter_latencies
+        current[defs.INTER_OUTPUT_LATENCY_MS] = (
             sum(inter_latencies) / float(len(inter_latencies)) if inter_latencies else 0.0
         )
 
         vllm_ttft_ms = float(evt.vllm_ttft_ms)
-        current_vllm_ttft_ms = float(current.get("vllm_ttft_ms", 0.0))
+        current_vllm_ttft_ms = float(current.get(defs.VLLM_TTFT_MS, 0.0))
         if current_vllm_ttft_ms <= 0 < vllm_ttft_ms:
-            current["vllm_ttft_ms"] = vllm_ttft_ms
+            current[defs.VLLM_TTFT_MS] = vllm_ttft_ms
         vllm_tpot_ms = float(evt.vllm_tpot_ms)
         if vllm_tpot_ms > 0:
-            current["vllm_tpot_ms"] = vllm_tpot_ms
-        vllm_itls = list(current.get("vllm_itls_ms") or [])
+            current[defs.VLLM_TPOT_MS] = vllm_tpot_ms
+        vllm_itls = list(current.get(defs.VLLM_ITLS_MS) or [])
         vllm_itls.extend(list(evt.vllm_itls_ms or []))
-        current["vllm_itls_ms"] = vllm_itls
-        current["vllm_itl_ms"] = sum(vllm_itls) / float(len(vllm_itls)) if vllm_itls else 0.0
+        current[defs.VLLM_ITLS_MS] = vllm_itls
+        current[defs.VLLM_ITL_MS] = sum(vllm_itls) / float(len(vllm_itls)) if vllm_itls else 0.0
 
-        output_count = int(current.get("output_unit_count", 0))
+        output_count = int(current.get(defs.OUTPUT_UNIT_COUNT, 0))
         remaining_ms = max(
-            float(current.get("stage_gen_time_ms", 0.0)) - float(current.get("serving_time_to_first_output_ms", 0.0)),
+            float(current.get(defs.STAGE_GEN_TIME_MS, 0.0))
+            - float(current.get(defs.SERVING_TIME_TO_FIRST_OUTPUT_MS, 0.0)),
             0.0,
         )
-        current["time_per_output_unit_ms"] = remaining_ms / float(output_count - 1) if output_count > 1 else 0.0
+        current[defs.TIME_PER_OUTPUT_UNIT_MS] = remaining_ms / float(output_count - 1) if output_count > 1 else 0.0
         duration_s = float(current.get(f"{defs.AUDIO_DURATION}_s", 0.0))
         current[defs.AUDIO_RTF] = defs.compute_audio_rtf(
-            float(current.get("stage_gen_time_ms", 0.0)) / 1000.0, duration_s
+            float(current.get(defs.STAGE_GEN_TIME_MS, 0.0)) / 1000.0, duration_s
         )
         return current
 
