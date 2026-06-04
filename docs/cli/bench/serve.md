@@ -2,7 +2,7 @@
 The vllm bench command launches the vLLM-Omni benchmark to evaluate the performance of multimodal models.
 
 ## Notes
-We currently only support using the "openai-chat-omni" backend.
+We currently only support using the "openai-chat-omni" and "openai-image-edits-omni" backend.
 
 ## Basic Parameter Description
 You can use `vllm bench serve --omni --help=all` to get descriptions of all parameters. The commonly used parameters are described below:
@@ -280,7 +280,9 @@ Generate synthetic image、video、audio inputs alongside random text prompts to
 
 Notes:
 
-- Works only with online benchmark via the OpenAI backend (`--backend openai-chat-omni`) and endpoint `/v1/chat/completions`.
+- Works only with online benchmark via:
+  - the OpenAI chat backend (`--backend openai-chat-omni`) and endpoint `/v1/chat/completions`.
+  - the OpenAI edit image backend (`--backend openai-image-edits-omni`) and endpoint `/v1/images/edits`.
 
 Start the server (example):
 
