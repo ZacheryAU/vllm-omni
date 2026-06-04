@@ -435,6 +435,8 @@ class StagePool:
         self._affinity.pop(request_id, None)
         self._output_timestamps_by_request.pop(str(request_id), None)
         self._non_empty_first_output_timestamps_by_request.pop(str(request_id), None)
+        self._audio_frames_by_request.pop(str(request_id), None)
+        self._audio_sample_rate_by_request.pop(str(request_id), None)
 
     def release_bindings(self, request_ids: list[str]) -> None:
         """Drop route bindings for the given request ids in this stage."""
@@ -619,7 +621,7 @@ class StagePool:
 
     @staticmethod
     def _is_streaming_output_unit_type(unit_type: str) -> bool:
-        return unit_type in {"text", "stream", "audio"}
+        return unit_type in {"text", "stream"}
 
     def _count_output_units(
         self,
