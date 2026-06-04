@@ -500,6 +500,36 @@ def _add_image_edit_extra_body_to_form(form: aiohttp.FormData, extra_body: dict[
             form.add_field(key, str(value))
 
 
+def _coerce_positive_int(value: Any) -> int | None:
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        return None
+    return coerced if coerced > 0 else None
+
+
+def _extract_output_tokens_from_metrics(metrics: dict[str, Any]) -> int | None:
+    top_level_tokens = _coerce_positive_int(metrics.get(defs.NUM_TOKENS_OUT))
+    if top_level_tokens is not None:
+        return top_level_tokens
+
+    stage_snapshot = metrics.get("stage_metrics")
+    if not isinstance(stage_snapshot, dict):
+        return None
+
+    fallback_tokens: list[int] = []
+    for info in stage_snapshot.values():
+        if not isinstance(info, dict):
+            continue
+        num_tokens_out = _coerce_positive_int(info.get(defs.NUM_TOKENS_OUT))
+        if num_tokens_out is None:
+            continue
+        if info.get("final_output_type") == "text" or info.get("output_unit_type") == "token":
+            return num_tokens_out
+        fallback_tokens.append(num_tokens_out)
+    return max(fallback_tokens, default=None)
+
+
 def _update_output_stage_metrics_from_payload(
     output: MixRequestFuncOutput,
     data: dict[str, Any],
@@ -510,7 +540,7 @@ def _update_output_stage_metrics_from_payload(
     if not isinstance(metrics, dict):
         return
     if update_output_tokens:
-        if (num_tokens_out := metrics.get("num_tokens_out")) is not None and int(num_tokens_out) > 0:
+        if (num_tokens_out := _extract_output_tokens_from_metrics(metrics)) is not None:
             output.output_tokens = num_tokens_out
     if isinstance(sid := metrics.get("stage_id"), int):
         output.stage_id = sid

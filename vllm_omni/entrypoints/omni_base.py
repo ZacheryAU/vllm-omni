@@ -189,6 +189,7 @@ class OmniBase(PDDisaggregationMixin):
         self.async_chunk = bool(getattr(self.engine, "async_chunk", False))
 
         self.request_states: dict[str, ClientRequestState] = {}
+        self._consumed_metric_messages: dict[str, set[int]] = {}
         self.prom_metrics = OmniPrometheusMetrics(model_name=model, log_stats=log_stats)
         self.mod_metrics = OmniModalityMetrics(model_name=model, log_stats=log_stats)
 
@@ -308,6 +309,7 @@ class OmniBase(PDDisaggregationMixin):
             )
         finally:
             self.request_states.pop(request_id, None)
+            self._consumed_metric_messages.pop(request_id, None)
             # Republish gauges so any stale value left by the per-stage
             # publish in _process_single_result (which runs while the request
             # is still in self.request_states) is corrected after the pop.
@@ -393,16 +395,16 @@ class OmniBase(PDDisaggregationMixin):
         if msg.metrics is not None and not msg.finished and req_state.metrics is not None:
             stage_meta = self.engine.get_stage_metadata(stage_id)
             output_type = getattr(msg.engine_outputs, "final_output_type", stage_meta.final_output_type)
-            req_state.metrics.on_stage_metrics(stage_id, req_id, msg.metrics, output_type)
-            submit_ts = msg.stage_submit_ts
-            now = time.time()
-            if req_state.metrics.stage_first_ts[stage_id] is None:
-                req_state.metrics.stage_first_ts[stage_id] = submit_ts if submit_ts is not None else now
-            req_state.metrics.stage_last_ts[stage_id] = max(req_state.metrics.stage_last_ts[stage_id] or 0.0, now)
-            # The per-request generator can stop as soon as the final e2e stage
-            # finishes, so non-final final-output stage metrics must be recorded
-            # before queueing. Clear them to avoid double counting if consumed.
-            msg.metrics = None
+            msg_id = id(msg)
+            consumed = self._consumed_metric_messages.setdefault(req_id, set())
+            if msg_id not in consumed:
+                req_state.metrics.on_stage_metrics(stage_id, req_id, msg.metrics, output_type)
+                submit_ts = msg.stage_submit_ts
+                now = time.time()
+                if req_state.metrics.stage_first_ts[stage_id] is None:
+                    req_state.metrics.stage_first_ts[stage_id] = submit_ts if submit_ts is not None else now
+                req_state.metrics.stage_last_ts[stage_id] = max(req_state.metrics.stage_last_ts[stage_id] or 0.0, now)
+                consumed.add(msg_id)
 
         return False, req_id, stage_id, req_state
 

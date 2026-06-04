@@ -285,12 +285,13 @@ def print_image_metrics(selected_percentiles: list[float], metrics: MultiModalsB
             getattr(metrics, defs.AVERAGE_PIXELS_PER_IMAGE),
         )
     )
-    print(
-        "{:<40} {:<10.2f}".format(
-            "Mean denoise step latency (ms):",
-            getattr(metrics, defs.MEAN_DENOISE_STEP_LATENCY_MS),
+    if getattr(metrics, defs.MEAN_DENOISE_STEP_LATENCY_MS) > 0:
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Mean denoise step latency (ms):",
+                getattr(metrics, defs.MEAN_DENOISE_STEP_LATENCY_MS),
+            )
         )
-    )
     if getattr(metrics, defs.MEAN_IMAGE_GENERATION_MS) > 0:
         print("-----------------Image Generation-----------------")
         print("{:<40} {:<10.2f}".format("Mean IMAGE_GENERATION (ms):", getattr(metrics, defs.MEAN_IMAGE_GENERATION_MS)))

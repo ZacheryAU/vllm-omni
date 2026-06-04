@@ -28,9 +28,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from PIL import Image
 from pydantic import BaseModel, Field
 from starlette.datastructures import State
-from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Route
+from starlette.types import ASGIApp, Receive, Scope, Send
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.chat_utils import load_chat_template
@@ -448,16 +447,6 @@ async def omni_run_server_worker(listen_address, sock, args, client_config=None,
         # OMNI: Pass supported_tasks to build_app (required by upstream vLLM)
         app = build_openai_app(args, supported_tasks)
 
-        async def record_request_timestamp(request: Request, call_next):
-            request.state.request_timestamp = time.time()
-            return await call_next(request)
-
-        # Upstream build_app may already build the middleware stack. Insert the
-        # lightweight timestamp middleware directly and rebuild the stack instead
-        # of calling add_middleware(), which Starlette rejects after stack build.
-        app.user_middleware.insert(0, Middleware(BaseHTTPMiddleware, dispatch=record_request_timestamp))
-        app.middleware_stack = app.build_middleware_stack()
-
         # OMNI: Remove upstream routes that we override with omni-specific handlers
         _remove_route_from_app(app, "/v1/chat/completions", {"POST"})
         _remove_route_from_app(app, "/v1/models", {"GET"})  # Remove upstream /v1/models to use omni's handler
@@ -490,8 +479,28 @@ async def omni_run_server_worker(listen_address, sock, args, client_config=None,
                 vllm_config.parallel_config._api_process_rank,
                 listen_address,
             )
+        class _TimestampMiddleware:
+            """Pure-ASGI outermost wrapper that stamps HTTP request arrival time.
+
+            Wraps the fully-built Starlette app as an outer ASGI layer so no
+            Starlette internals (user_middleware, middleware_stack, etc.) are
+            touched. Websocket and lifespan scopes pass through unchanged.
+            """
+
+            def __init__(self, inner: ASGIApp) -> None:
+                self._inner = inner
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+                if scope["type"] == "http":
+                    scope.setdefault("state", {})
+                    scope["state"]["request_timestamp"] = time.time()
+                await self._inner(scope, receive, send)
+
         shutdown_task = await serve_http(
-            app,
+            _TimestampMiddleware(app),
             sock=sock,
             enable_ssl_refresh=args.enable_ssl_refresh,
             host=args.host,
