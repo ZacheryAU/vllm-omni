@@ -1,4 +1,3 @@
-import os
 import warnings
 from collections import defaultdict
 from dataclasses import field, make_dataclass
@@ -159,10 +158,6 @@ def _wants_stream_icl(metrics: list[str]) -> bool:
     return "icl" in metrics
 
 
-def _should_print_stage_metrics() -> bool:
-    return os.environ.get("VLLM_OMNI_PRINT_STAGE") == "1"
-
-
 def _stage_modality_flags(
     final_output_type: str,
     output_unit_type: str,
@@ -194,6 +189,7 @@ def print_metrics(
     *,
     outputs: list[RequestFuncOutput] | None = None,
     selected_percentiles: list[float] | None = None,
+    print_stage: bool = False,
 ):
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
@@ -216,7 +212,7 @@ def print_metrics(
             print_audio_metrics(selected_percentile_metrics, metrics)
         if _has_image_output(metrics):
             print_image_metrics(selected_percentiles or [], metrics)
-        if _should_print_stage_metrics() and outputs and selected_percentiles is not None:
+        if print_stage and outputs and selected_percentiles is not None:
             print("\n{s:{c}^{n}}".format(s=" Stage Benchmark Result ", n=50, c="="))
             for sm in _build_stage_metrics_from_outputs(outputs):
                 print_stage_metrics(
@@ -718,6 +714,7 @@ def calculate_metrics(
     max_concurrency,
     request_rate,
     benchmark_duration,
+    print_stage: bool = False,
 ) -> tuple[BenchmarkMetrics, list[int]]:
     """Calculate the metrics for the benchmark.
 
@@ -973,5 +970,6 @@ def calculate_metrics(
         metrics,
         outputs=outputs,
         selected_percentiles=selected_percentiles,
+        print_stage=print_stage,
     )
     return metrics, actual_output_lens

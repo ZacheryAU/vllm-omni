@@ -54,6 +54,7 @@ from vllm_omni.metrics import definitions as defs
 _AUDIO_CONTINUITY_THRESHOLD_ENV = "VLLM_OMNI_BENCH_AUDIO_CONTINUITY_THRESHOLD_S"
 RETURN_STAGE_METRICS_FIELD = "return_stage_metrics"
 _IMAGE_STAGE_METRICS_BACKENDS = frozenset({"openai-image-edits-omni"})
+_PRINT_STAGE = False
 
 
 def maybe_enable_stage_metrics(extra_body: dict[str, Any] | None, *, enabled: bool) -> dict[str, Any] | None:
@@ -77,6 +78,12 @@ def should_request_stage_metrics(args: Any) -> bool:
     extra_body = getattr(args, "extra_body", None) or {}
     modalities = extra_body.get("modalities") if isinstance(extra_body, dict) else None
     return backend == "openai-chat-omni" and "image" in (modalities or [])
+
+
+def set_print_stage(enabled: bool) -> None:
+    """Set whether this benchmark run prints the stage benchmark section."""
+    global _PRINT_STAGE
+    _PRINT_STAGE = bool(enabled)
 
 
 def _audio_continuity_threshold_s() -> float:
@@ -1354,6 +1361,7 @@ async def benchmark(
             max_concurrency=max_concurrency,
             request_rate=request_rate,
             benchmark_duration=benchmark_duration,
+            print_stage=_PRINT_STAGE,
         )
     else:
         metrics = calculate_metrics_for_embeddings(
