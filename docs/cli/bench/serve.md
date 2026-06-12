@@ -64,7 +64,7 @@ You can use `vllm bench serve --omni --help=all` to get descriptions of all para
                     '"tpop", "e2el", "audio_ttfp", "audio_rtf", "audio_duration". '
 
 - `--print-stage`
-Print per-stage benchmark metrics for --omni serving when stage metrics are returned by the server. Disabled by default.
+Control whether or not per-stage benchmark metrics are printed. Disabled by default.
 
 - `--save-result`
 Specify to save benchmark results to a json file
