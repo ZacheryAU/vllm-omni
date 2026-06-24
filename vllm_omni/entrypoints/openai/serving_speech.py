@@ -12,6 +12,7 @@ import re
 import struct
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from pathlib import Path
@@ -2212,6 +2213,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         tts_params: dict[str, Any] | None = None,
         collect: dict | None = None,
         target_sample_rate: int | None = None,
+        on_final_metrics: Callable[[dict[str, object]], None] | None = None,
     ):
         """Generate audio chunks for streaming response.
 
@@ -2237,6 +2239,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         artifact_ready = False
         source_sample_rate: int | None = None
         resampler: StreamingAudioResampler | None = None
+        last_res = None
 
         # SSE supplies an accumulator for usage output. Raw-audio and WebSocket
         # streams retain terminal metrics only when their model adapter needs
@@ -2251,6 +2254,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 # off the final output; a cheap early-return on every other res).
                 if usage_acc is not None:
                     usage_acc.observe(res)
+                last_res = res
                 audio_output, audio_key = self._extract_audio_output(res)
                 if audio_key is None:
                     # Stash the aligner's timestamps output for streaming callers.
@@ -2365,6 +2369,10 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             # bytes, but they must terminate as an error rather than cleanly.
             if tts_params is not None and usage_acc is not None:
                 self._validate_tts_generation(tts_params, usage_acc)
+            if on_final_metrics is not None and last_res is not None:
+                metrics = getattr(last_res, "metrics", None) or {}
+                if metrics:
+                    on_final_metrics(metrics)
             self._mark_ref_audio_artifact_ready_for_request(request_id)
             artifact_ready = True
             total_ms = (time.perf_counter() - stream_start_s) * 1000.0
@@ -2433,6 +2441,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         request_start_s: float | None = None,
         request: OpenAICreateSpeechRequest | None = None,
         tts_params: dict[str, Any] | None = None,
+        return_stage_metrics: bool = False,
     ):
         """Generate OpenAI-style SSE events with base64 audio deltas.
 
@@ -2450,8 +2459,13 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         """
         usage_acc = SpeechOutputTokenCounter()
         emitted_audio = False
+        final_metrics: dict[str, object] = {}
+
+        def capture_final_metrics(metrics: dict[str, object]) -> None:
+            final_metrics.update(metrics)
+
         try:
-            async for chunk in self._generate_audio_chunks(
+            async for item in self._generate_audio_chunks(
                 generator,
                 request_id,
                 response_format,
@@ -2460,15 +2474,30 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 usage_acc=usage_acc,
                 tts_params=tts_params,
                 target_sample_rate=request.sample_rate if request is not None else None,
+                include_sample_rate=True,
+                on_final_metrics=capture_final_metrics if return_stage_metrics else None,
             ):
+                if isinstance(item, tuple):
+                    chunk, sample_rate = item
+                else:
+                    chunk, sample_rate = item, None
                 payload = {
                     "type": "speech.audio.delta",
                     "audio": base64.b64encode(chunk).decode("ascii"),
                     "response_format": response_format,
                 }
+                if sample_rate is not None:
+                    payload["sample_rate"] = sample_rate
                 data = json.dumps(payload, separators=(",", ":"))
                 emitted_audio = True
                 yield f"event: speech.audio.delta\ndata: {data}\n\n"
+            if return_stage_metrics and final_metrics:
+                metrics_payload = {
+                    "type": "speech.metrics",
+                    "metrics": final_metrics,
+                }
+                data = json.dumps(metrics_payload, separators=(",", ":"))
+                yield f"event: speech.metrics\ndata: {data}\n\n"
             done_payload: dict[str, Any] = {"type": "speech.audio.done"}
             if request is not None:
                 # Streaming path: output_tokens = sum of stage-0 deltas.
@@ -3683,6 +3712,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                         request_start_s=request_start_s,
                         request=request,
                         tts_params=sse_tts_params,
+                        return_stage_metrics=request.return_stage_metrics,
                     ),
                     media_type="text/event-stream",
                 )
