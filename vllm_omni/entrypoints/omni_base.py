@@ -505,7 +505,11 @@ class OmniBase(PDDisaggregationMixin):
         stage_meta = self.engine.get_stage_metadata(stage_id)
         output_type = getattr(engine_outputs, "final_output_type", stage_meta.final_output_type)
         if finished and _m is not None:
-            metrics.on_stage_metrics(stage_id, req_id, _m, output_type)
+            msg_id = id(result)
+            consumed = self._consumed_metric_messages.setdefault(req_id, set())
+            if msg_id not in consumed:
+                metrics.on_stage_metrics(stage_id, req_id, _m, output_type)
+                consumed.add(msg_id)
 
         if not stage_meta.final_output:
             return None
