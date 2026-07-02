@@ -6,7 +6,7 @@ This document describes how vLLM-Omni exposes Prometheus metrics for multi-stage
 
 - Expose pipeline-level request and latency metrics that span the full multi-stage execution (orchestrator scope).
 - Preserve all upstream vLLM per-engine metrics (`vllm:*`) for stages backed by an AR LLM engine, and reshape their `engine` label into `stage` + `replica` so multi-replica deployments gain per-replica visibility automatically.
-- Expose per-modality SLO metrics that the upstream `vllm:*` families do not capture — audio TTFP / duration / frames / streaming continuity / silent-loss.
+- Expose per-modality SLO metrics that the upstream `vllm:*` families do not capture — audio TTFP / RTF / duration / frames / streaming continuity / silent-loss.
 - Expose per-replica-edge cross-stage transfer metrics so the slack between E2E latency and the sum of per-stage `gen_time` (queueing, serialization, network) becomes attributable.
 - Keep the metrics collection overhead low enough that it does not regress TTFA or throughput.
 
