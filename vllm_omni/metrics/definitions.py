@@ -13,7 +13,9 @@ time-bearing metrics use the ``_s`` suffix (values in seconds), counters use
 
 import logging
 import os
-from typing import Any
+from collections.abc import Mapping, Sequence
+
+from vllm_omni.metrics.utils import resolve_int_by_sequential_keys
 
 # vllm_omni: namespace for omni-specific Prometheus families, distinct from
 # the upstream vllm:* families.
@@ -290,28 +292,42 @@ AUDIO_CHANNELS_ENV = "VLLM_OMNI_BENCH_AUDIO_CHANNELS"
 _SAMPLE_RATE_KEYS = ("output_sample_rate", "audio_sample_rate", "sample_rate", "sampling_rate", "sr")
 
 
-def resolve_audio_sample_rate(source: dict[str, Any] | Any | None) -> int:
-    """Extract audio sample_rate from a dict or config object, with fallbacks.
+def resolve_audio_sample_rate_or_none(
+    source: Sequence[Mapping[str, object] | object | None] | Mapping[str, object] | object | None,
+) -> int | None:
+    """Extract an explicitly configured audio sample rate, or ``None`` when absent.
 
-    Tries the same key chain as serving_chat.py's audio response path so
-    /metrics audio_duration_s = audio_frames / sample_rate stays consistent
-    with what the OpenAI streaming endpoint reports back to clients. Also
-    accepts config objects that expose the same values as attributes.
-    Returns DEFAULT_AUDIO_SAMPLE_RATE when no usable value is present.
+    ``source`` may be:
+
+    - a Mapping (e.g. ``multimodal_output`` / config dict)
+    - an object exposing the same fields as attributes
+    - a Sequence of the above (``str`` / ``bytes`` excluded); the first
+      positive rate found across items wins
     """
-    if not source:
-        return DEFAULT_AUDIO_SAMPLE_RATE
-    for key in _SAMPLE_RATE_KEYS:
-        raw = source.get(key) if isinstance(source, dict) else getattr(source, key, None)
-        if raw is None:
-            continue
-        try:
-            value = int(raw)
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
-            return value
-    return DEFAULT_AUDIO_SAMPLE_RATE
+    if isinstance(source, Sequence) and not isinstance(source, (str, bytes, bytearray)):
+        for item in source:
+            rate = resolve_int_by_sequential_keys(item, _SAMPLE_RATE_KEYS)
+            if rate is not None:
+                return rate
+        return None
+    return resolve_int_by_sequential_keys(source, _SAMPLE_RATE_KEYS)
+
+
+def resolve_audio_sample_rate(
+    source: Sequence[Mapping[str, object] | object | None] | Mapping[str, object] | object | None,
+    default: int = DEFAULT_AUDIO_SAMPLE_RATE,
+) -> int:
+    """Extract audio sample rate from a dict, config object, or list thereof.
+
+    Delegates to :func:`resolve_audio_sample_rate_or_none` (same key chain and
+    coerce rules). Returns ``default`` (``DEFAULT_AUDIO_SAMPLE_RATE`` unless
+    overridden) when no usable positive rate is present.
+
+    Used so /metrics ``audio_duration_s = audio_frames / sample_rate`` stays
+    consistent with rates surfaced on multimodal outputs and stage configs.
+    """
+    rate = resolve_audio_sample_rate_or_none(source)
+    return rate if rate is not None else default
 
 
 def stream_pcm_format_from_env(
