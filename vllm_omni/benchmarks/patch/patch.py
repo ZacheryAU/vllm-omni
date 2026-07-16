@@ -48,7 +48,7 @@ from vllm_omni.benchmarks.data_modules.seed_tts_dataset import (
 from vllm_omni.benchmarks.data_modules.sound_effect_dataset import SoundEffectDataset
 from vllm_omni.benchmarks.data_modules.ttsd_dataset import TTSDDataset
 from vllm_omni.metrics import definitions as defs
-from vllm_omni.metrics.utils import coerce_int_scalar
+from vllm_omni.metrics.utils import coerce_positive_int_scalar
 
 logger = init_logger(__name__)
 
@@ -526,7 +526,7 @@ def _add_image_edit_extra_body_to_form(form: aiohttp.FormData, extra_body: dict[
 
 
 def _extract_output_tokens_from_metrics(metrics: dict[str, Any]) -> int | None:
-    top_level_tokens = coerce_int_scalar(metrics.get(defs.NUM_TOKENS_OUT))
+    top_level_tokens = coerce_positive_int_scalar(metrics.get(defs.NUM_TOKENS_OUT))
     if top_level_tokens is not None:
         return top_level_tokens
 
@@ -538,7 +538,7 @@ def _extract_output_tokens_from_metrics(metrics: dict[str, Any]) -> int | None:
     for info in stage_snapshot.values():
         if not isinstance(info, dict):
             continue
-        num_tokens_out = coerce_int_scalar(info.get(defs.NUM_TOKENS_OUT))
+        num_tokens_out = coerce_positive_int_scalar(info.get(defs.NUM_TOKENS_OUT))
         if num_tokens_out is None:
             continue
         if info.get("final_output_type") == "text" or info.get("output_unit_type") == "token":
@@ -549,9 +549,9 @@ def _extract_output_tokens_from_metrics(metrics: dict[str, Any]) -> int | None:
 
 def _apply_usage_to_output(output: MixRequestFuncOutput, usage: dict[str, Any]) -> int | None:
     """Apply OpenAI ``usage`` fields to the benchmark output."""
-    if (pt := coerce_int_scalar(usage.get("prompt_tokens"))) is not None:
+    if (pt := coerce_positive_int_scalar(usage.get("prompt_tokens"))) is not None:
         output.prompt_len = pt
-    completion_tokens = coerce_int_scalar(usage.get("completion_tokens"))
+    completion_tokens = coerce_positive_int_scalar(usage.get("completion_tokens"))
     if completion_tokens is not None:
         output.output_tokens = max(int(output.output_tokens or 0), completion_tokens)
     return completion_tokens

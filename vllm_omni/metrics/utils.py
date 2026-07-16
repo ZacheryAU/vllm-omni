@@ -5,7 +5,7 @@ from typing import Any
 from prettytable import PrettyTable
 
 
-def coerce_int_scalar(value: object) -> int | None:
+def coerce_positive_int_scalar(value: object) -> int | None:
     """Coerce a value to a positive int without importing tensor libs.
 
     Meant to pull positive integers such as sample rate out of the shapes
@@ -24,7 +24,7 @@ def coerce_int_scalar(value: object) -> int | None:
         return None
     if isinstance(value, (list, tuple)):
         for item in value:
-            coerced = coerce_int_scalar(item)
+            coerced = coerce_positive_int_scalar(item)
             if coerced is not None:
                 return coerced
         return None
@@ -48,14 +48,14 @@ def resolve_int_by_sequential_keys(
     """Return the first positive int found by trying ``keys`` in order.
 
     For each key, looks up ``source[key]`` when ``source`` is a Mapping, otherwise
-    ``getattr(source, key, None)``. Values are coerced via :func:`coerce_int_scalar`.
+    ``getattr(source, key, None)``. Values are coerced via :func:`coerce_positive_int_scalar`.
     Returns ``None`` when ``source`` is empty/missing or no key yields a usable int.
     """
     if not source:
         return None
     for key in keys:
         raw = source.get(key) if isinstance(source, Mapping) else getattr(source, key, None)
-        value = coerce_int_scalar(raw)
+        value = coerce_positive_int_scalar(raw)
         if value is not None:
             return value
     return None

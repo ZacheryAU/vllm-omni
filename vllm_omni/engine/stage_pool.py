@@ -29,7 +29,7 @@ from vllm_omni.metrics import definitions as defs
 from vllm_omni.metrics.stats import StageRequestStats as StageRequestMetrics
 from vllm_omni.metrics.stats import StageStats
 from vllm_omni.metrics.utils import (
-    coerce_int_scalar,
+    coerce_positive_int_scalar,
     count_audio_frames,
     count_image_pixels,
     count_tokens_from_outputs,
@@ -568,7 +568,7 @@ class StagePool:
             else 0.0
         )
         image_pixels = self._count_image_pixels(request_outputs) if output_unit_type == "image" else 0
-        num_inference_steps = coerce_int_scalar(getattr(sampling_params, "num_inference_steps", None)) or 0
+        num_inference_steps = coerce_positive_int_scalar(getattr(sampling_params, "num_inference_steps", None)) or 0
         denoise_step_latency_ms = (
             defs.compute_denoise_step_latency(stage_gen_time_ms, num_inference_steps)
             if output_unit_type == "image"
