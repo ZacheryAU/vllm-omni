@@ -145,7 +145,7 @@ def count_audio_chunk_frames(audio_chunk: object) -> int:
 
 
 def count_audio_frames(mm_out: Mapping[str, Any]) -> int:
-    """Sum frame counts over all audio chunks in ``mm_out["audio"]``.
+    """Sum frame counts over all audio chunks in ``mm_out["audio"]`` or with other related keys.
 
     For multi-dim tensors (e.g. shape ``[channels, samples]``) the last axis is
     the sample dim; for 1-D tensors the only axis is the sample dim; scalars
