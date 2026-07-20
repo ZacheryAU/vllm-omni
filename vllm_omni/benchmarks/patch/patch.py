@@ -894,12 +894,22 @@ async def async_request_openai_chat_omni_completions(
                     audio_frames = 0
                     if response_format == "wav" and wav_pcm_buffer and wav_audio_params is not None:
                         channels, sample_width, frame_rate = wav_audio_params
-                        frame_width = sample_width * channels
-                        if frame_width > 0:
-                            audio_frames = len(wav_pcm_buffer) // frame_width
-                            audio_duration_sec = audio_frames / frame_rate
+                        audio_frames = defs.compute_audio_frames(
+                            len(wav_pcm_buffer),
+                            sample_width=sample_width,
+                            channels=channels,
+                        )
+                        if audio_frames > 0 and frame_rate > 0:
+                            audio_duration_sec = audio_frames / float(frame_rate)
                         else:
-                            logger.warning("Audio frame width is zero")
+                            logger.warning(
+                                "Unable to derive audio frames/duration from wav pcm "
+                                "(pcm_nbytes=%d, sample_width=%d, channels=%d, sample_rate=%d)",
+                                len(wav_pcm_buffer),
+                                sample_width,
+                                channels,
+                                frame_rate,
+                            )
                     elif audio_bytes_buffer:
                         try:
                             from vllm.multimodal.audio import get_audio_duration
@@ -918,10 +928,8 @@ async def async_request_openai_chat_omni_completions(
                         output.audio_duration = audio_duration_sec
                         output.audio_frames = audio_frames
                         audio_duration = output.audio_duration
-                        if audio_duration > 0:
-                            output.audio_rtf = audio_generate_time / output.audio_duration
-                        else:
-                            output.audio_rtf = 0
+                        output.audio_rtf = defs.compute_audio_rtf(audio_generate_time, audio_duration)
+                        if audio_duration <= 0:
                             logger.warning("Audio duration is zero")
                         if _seed_tts_capture_pcm_for_wer() and getattr(request_func_input, "seed_tts_row", False):
                             try:
@@ -1154,7 +1162,7 @@ async def async_request_openai_audio_speech(
 
     # PCM format: 16-bit signed; sample_rate/channels are model-dependent.
     sample_rate, channels = defs.stream_pcm_format_from_env()
-    sample_width = 2  # 16-bit = 2 bytes
+    sample_width = defs.DEFAULT_AUDIO_SAMPLE_WIDTH
 
     st = time.perf_counter()
     output.start_time = st
@@ -1183,13 +1191,17 @@ async def async_request_openai_audio_speech(
                 end_time = time.perf_counter()
                 output.latency = end_time - st
 
-                total_samples = total_pcm_bytes // (sample_width * channels)
-                output.audio_duration = total_samples / sample_rate
+                total_samples = defs.compute_audio_frames(
+                    total_pcm_bytes,
+                    sample_width=sample_width,
+                    channels=channels,
+                )
                 output.audio_frames = total_samples
-                if output.audio_duration > 0:
-                    output.audio_rtf = output.latency / output.audio_duration
-                else:
-                    output.audio_rtf = 0
+                output.audio_duration = (
+                    float(total_samples) / float(sample_rate) if total_samples > 0 and sample_rate > 0 else 0.0
+                )
+                output.audio_rtf = defs.compute_audio_rtf(output.latency, output.audio_duration)
+                if output.audio_duration <= 0:
                     logger.warning("Audio duration is zero")
 
                 continuity = compute_continuity_stats(

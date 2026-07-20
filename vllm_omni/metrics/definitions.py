@@ -245,8 +245,20 @@ BYTES_BUCKETS = (
 
 
 # ============================================================================
-# Audio-continuity defaults
+# Audio defaults (shared by server-side observe and bench-side calculation)
 # ============================================================================
+# Most common across vllm-omni talker variants (cosyvoice3, omnivoice,
+# qwen3_tts, mimo_audio). voxcpm2 uses 48000, stable_audio 44100,
+# ming_flash 16000 — these models surface a rate at runtime on one of
+# ``_SAMPLE_RATE_KEYS``, so DEFAULT_AUDIO_SAMPLE_RATE only applies when no
+# usable positive rate is found (and as the bench PCM default when env is unset).
+# Streamed OpenAI ``response_format=pcm`` is PCM_16 (s16le); sample width is fixed.
+DEFAULT_AUDIO_SAMPLE_RATE = 24000
+DEFAULT_AUDIO_CHANNELS = 1
+DEFAULT_AUDIO_SAMPLE_WIDTH = 2  # PCM s16le bytes per sample
+AUDIO_SAMPLE_RATE_ENV = "VLLM_OMNI_BENCH_AUDIO_SAMPLE_RATE"
+AUDIO_CHANNELS_ENV = "VLLM_OMNI_BENCH_AUDIO_CHANNELS"
+
 # Default underrun threshold — kept aligned with the bench-side default and
 # the commonly-cited "audible gap" threshold for streaming TTS.
 AUDIO_CONTINUITY_DEFAULT_THRESHOLD_S = 0.1
@@ -255,8 +267,8 @@ AUDIO_CONTINUITY_DEFAULT_THRESHOLD_S = 0.1
 # ============================================================================
 # Formula helpers (shared by server-side observe and bench-side calculation)
 # ============================================================================
-def compute_audio_rtf(stage_gen_time_s: float, audio_duration_s: float) -> float:
-    """RTF = stage_gen_time / audio_content_duration.
+def compute_audio_rtf(audio_generation_latency_s: float, audio_duration_s: float) -> float:
+    """RTF = audio_generation_latency / audio_content_duration.
 
     SLO red line < 1 — must generate faster than content plays back to stream.
     Returns 0.0 when audio_duration_s is non-positive (caller decides whether
@@ -264,7 +276,30 @@ def compute_audio_rtf(stage_gen_time_s: float, audio_duration_s: float) -> float
     """
     if audio_duration_s <= 0:
         return 0.0
-    return stage_gen_time_s / audio_duration_s
+    return audio_generation_latency_s / audio_duration_s
+
+
+def compute_audio_frames(
+    pcm_nbytes: int,
+    *,
+    sample_width: int = DEFAULT_AUDIO_SAMPLE_WIDTH,
+    channels: int = DEFAULT_AUDIO_CHANNELS,
+) -> int:
+    """Convert a PCM byte length to sample/frame count.
+
+    ``pcm_nbytes`` is the raw byte size of interleaved PCM (e.g.
+    ``total_pcm_bytes`` or ``len(wav_pcm_buffer)``). Defaults match the
+    streamed s16le mono contract
+    (``DEFAULT_AUDIO_SAMPLE_WIDTH``, ``DEFAULT_AUDIO_CHANNELS``);
+    WAV callers should pass header values.
+
+    Returns 0 when the byte count or frame width (``sample_width * channels``)
+    is non-positive.
+    """
+    frame_width = sample_width * channels
+    if pcm_nbytes <= 0 or frame_width <= 0:
+        return 0
+    return pcm_nbytes // frame_width
 
 
 def compute_denoise_step_latency(stage_gen_time: float, num_inference_steps: int) -> float:
@@ -280,15 +315,6 @@ def compute_denoise_step_latency(stage_gen_time: float, num_inference_steps: int
 # ============================================================================
 # Audio sample-rate resolution
 # ============================================================================
-# Most common across vllm-omni talker variants (cosyvoice3, omnivoice,
-# qwen3_tts, mimo_audio). voxcpm2 uses 48000, stable_audio 44100,
-# ming_flash 16000 — these models populate multimodal_output["audio_sample_rate"]
-# at runtime so this default only kicks in when the field is missing.
-DEFAULT_AUDIO_SAMPLE_RATE = 24000
-DEFAULT_AUDIO_CHANNELS = 1
-AUDIO_SAMPLE_RATE_ENV = "VLLM_OMNI_BENCH_AUDIO_SAMPLE_RATE"
-AUDIO_CHANNELS_ENV = "VLLM_OMNI_BENCH_AUDIO_CHANNELS"
-
 _SAMPLE_RATE_KEYS = ("output_sample_rate", "audio_sample_rate", "sample_rate", "sampling_rate", "sr")
 
 
