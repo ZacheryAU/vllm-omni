@@ -1,3 +1,20 @@
+"""vLLM-Omni extensions for the ``vllm bench serve`` CLI.
+
+Core functions:
+    add_omni_args: Register all Omni-specific argument groups by calling the
+        feature-specific ``add_*_cli_args`` helpers in this module.
+    extend_omni_choices: Add Omni datasets and backends to choices defined by
+        the upstream vLLM parser, including its shadow parser.
+    update_omni_help: Extend upstream help text with Omni-specific behavior.
+    preprocess_serve_args: Apply transformations that require parsed values
+        before the serving benchmark starts.
+
+``OmniBenchmarkServingSubcommand.add_cli_args`` invokes the first three after
+upstream vLLM registers its arguments. New feature arguments should normally be
+added to the corresponding ``add_*_cli_args`` helper, or to a new helper called
+by ``add_omni_args``.
+"""
+
 import argparse
 
 
@@ -155,7 +172,8 @@ _OMNI_BENCH_DATASET_CHOICES = (
 )
 
 
-def _extend_omni_choices(parser: argparse.ArgumentParser) -> None:
+def extend_omni_choices(parser: argparse.ArgumentParser) -> None:
+    """Extend upstream argument choices with Omni-specific values."""
     parsers = [parser]
     shadow = getattr(parser, "_shadow", None)
     if shadow is not None:
@@ -173,7 +191,8 @@ def _extend_omni_choices(parser: argparse.ArgumentParser) -> None:
                     action.choices = list(action.choices) + extra
 
 
-def _update_omni_help(parser: argparse.ArgumentParser) -> None:
+def update_omni_help(parser: argparse.ArgumentParser) -> None:
+    """Update upstream argument help text to describe Omni-specific behavior."""
     for action in parser._actions:
         if action.dest == "percentile_metrics":
             action.help = (
@@ -208,14 +227,12 @@ def _update_omni_help(parser: argparse.ArgumentParser) -> None:
             )
 
 
-def add_serve_args(parser: argparse.ArgumentParser) -> None:
-    """Register all vLLM-Omni serving benchmark CLI extensions."""
+def add_omni_args(parser: argparse.ArgumentParser) -> None:
+    """Register all vLLM-Omni serving benchmark arguments."""
     add_daily_omni_cli_args(parser)
     add_seed_tts_cli_args(parser)
     add_multi_stage_cli_args(parser)
     add_diffusion_cli_args(parser)
-    _extend_omni_choices(parser)
-    _update_omni_help(parser)
 
 
 def preprocess_serve_args(args: argparse.Namespace) -> None:
