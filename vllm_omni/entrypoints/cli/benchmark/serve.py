@@ -1,3 +1,11 @@
+"""Online serving benchmark subcommand for vLLM-Omni.
+
+``OmniBenchmarkServingSubcommand`` starts from vLLM's serving benchmark
+arguments, adds Omni-specific options and adaptations, then preprocesses the
+parsed namespace and delegates execution to ``vllm_omni.benchmarks.serve``.
+This keeps CLI integration separate from the multimodal benchmark runtime.
+"""
+
 import argparse
 
 from vllm.benchmarks.serve import add_cli_args
