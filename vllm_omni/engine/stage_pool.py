@@ -699,7 +699,7 @@ class StagePool:
         self,
         request_outputs: list[Any],
         *,
-        use_default_sample_rate: bool = True,
+        use_default_sample_rate: bool = False,
     ) -> tuple[int, int, float]:
         total_frames = 0
         sample_rate = 0
