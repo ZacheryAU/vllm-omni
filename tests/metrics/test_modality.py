@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import pytest
+import torch
 from prometheus_client import REGISTRY, generate_latest
 
+from vllm_omni.engine.mm_outputs import MultimodalPayload
 from vllm_omni.metrics import definitions as defs
 from vllm_omni.metrics.modality import (
     OmniModalityMetrics,
@@ -180,8 +182,9 @@ class _Bag:
 class TestObserveModalityAtFinalize:
     def test_audio_path_full(self):
         stub = _StubModMetrics()
-        stage_metrics = _Bag(stage_gen_time_ms=500.0, audio_generated_frames=24000)
-        engine_outputs = _Bag(multimodal_output={"audio_sample_rate": 24000})
+        stage_metrics = _Bag(stage_gen_time_ms=500.0, audio_generated_frames=0)
+        payload = MultimodalPayload(tensors={"audio": torch.zeros(24000)})
+        engine_outputs = _Bag(multimodal_output=payload)
 
         observe_modality_at_finalize(
             stub,
@@ -191,13 +194,32 @@ class TestObserveModalityAtFinalize:
             stage_metrics=stage_metrics,
             engine_outputs=engine_outputs,
         )
-        # 24000 frames / 24000 Hz = 1.0s duration; gen 0.5s → rtf 0.5
+        # 24000 frames / 24000 Hz = 1.0s duration
         assert ("inc_audio_frames", "1", "0", 24000) in stub.calls
         assert ("observe_audio_duration", "1", "0", 1.0) in stub.calls
         # Continuity/underrun NOT emitted from finalize — they come from the
         # streaming hook because they need the per-chunk arrival timeline.
         assert not any(c[0] == "observe_audio_underrun" for c in stub.calls)
         assert not any(c[0] == "inc_audio_continuity_ok" for c in stub.calls)
+
+    def test_audio_path_nested_multimodal_payload(self):
+        stub = _StubModMetrics()
+        payload = MultimodalPayload(tensors={"audio": torch.zeros(24000)})
+        engine_outputs = _Bag(
+            multimodal_output=MultimodalPayload(),
+            outputs=[_Bag(multimodal_output=payload)],
+        )
+
+        observe_modality_at_finalize(
+            stub,
+            output_type="audio",
+            stage_id=1,
+            replica_id=0,
+            stage_metrics=_Bag(stage_gen_time_ms=500.0, audio_generated_frames=0),
+            engine_outputs=engine_outputs,
+        )
+        assert ("inc_audio_frames", "1", "0", 24000) in stub.calls
+        assert ("observe_audio_duration", "1", "0", 1.0) in stub.calls
 
     def test_audio_path_zero_frames_emits_skipped(self):
         stub = _StubModMetrics()
@@ -207,7 +229,7 @@ class TestObserveModalityAtFinalize:
             stage_id=1,
             replica_id=0,
             stage_metrics=_Bag(stage_gen_time_ms=300.0, audio_generated_frames=0),
-            engine_outputs=_Bag(multimodal_output={}),
+            engine_outputs=_Bag(multimodal_output=MultimodalPayload()),
         )
         assert ("inc_audio_frames", "1", "0", 0) in stub.calls
         assert not any(c[0] == "observe_audio_duration" for c in stub.calls)
