@@ -179,7 +179,7 @@ def count_image_pixels(value: object) -> int:
 
     Shape heuristics (aligned with StagePool image metrics):
 
-    - ``ndim >= 4`` (e.g. ``BCHW`` / ``BHWC``): ``B * H * W`` via
+    - ``ndim >= 4`` (e.g. ``BCHW``): ``B * H * W`` via
       ``dims[0] * dims[-2] * dims[-1]``
     - ``ndim == 3`` and ``dims[0] in (1, 3, 4)``: CHW → ``H * W``
     - ``ndim == 3`` and ``dims[-1] in (1, 3, 4)``: HWC → ``H * W``

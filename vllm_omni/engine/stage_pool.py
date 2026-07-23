@@ -25,14 +25,16 @@ from vllm_omni.engine.stage_client import (
     StagePoolLLMClient,
 )
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
+from vllm_omni.metrics import (
+    count_audio_frames,
+    count_image_pixels,
+    count_tokens_from_outputs,
+)
 from vllm_omni.metrics import definitions as defs
 from vllm_omni.metrics.stats import StageRequestStats as StageRequestMetrics
 from vllm_omni.metrics.stats import StageStats
 from vllm_omni.metrics.utils import (
     coerce_positive_int_scalar,
-    count_audio_frames,
-    count_image_pixels,
-    count_tokens_from_outputs,
     iter_mm_outputs,
 )
 
