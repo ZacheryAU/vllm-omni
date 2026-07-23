@@ -4,11 +4,11 @@ The `vllm bench serve --omni` command launches the vLLM-Omni benchmark to evalua
 ## Notes
 vLLM-Omni registers the `openai-chat-omni`, `openai-audio-speech`, `openai-image-edits-omni`, `daily-omni`, and `openai-realtime-duplex` serving benchmark backends. It also adds the `omniinteract` dataset.
 
-Currently these endpoints are available for `vllm bench serve --omni`: 
- Endpoint | Example models
- - | -
- /v1/chat/completions | Qwen3-Omni-30B-A3B-Instruct<br>BAGEL-7B-MoT<br>...
- /v1/images/edits | HunyuanImage-3.0-Instruct<br>...
+Currently these endpoints are available for `vllm bench serve --omni`:
+| Endpoint | Example models |
+| --- | --- |
+| /v1/chat/completions | Qwen3-Omni-30B-A3B-Instruct<br>BAGEL-7B-MoT<br>... |
+| /v1/images/edits | HunyuanImage-3.0-Instruct<br>... |
 
  More endpoints are on the way.
 
