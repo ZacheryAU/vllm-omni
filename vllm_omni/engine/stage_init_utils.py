@@ -1068,7 +1068,7 @@ def _finalize_engine_args_dict(
     # (e.g. `--stage-id` defaulting to None).
     engine_args_dict["stage_id"] = stage_id
     if stage_connector_spec:
-        engine_args_dict["stage_connector_spec"] = dict(stage_connector_spec or {})
+        engine_args_dict["stage_connector_spec"] = dict(stage_connector_spec)
 
     is_diffusion = stage_type == StageType.DIFFUSION
     if is_diffusion:
