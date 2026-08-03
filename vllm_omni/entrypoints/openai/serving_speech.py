@@ -2239,7 +2239,6 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         artifact_ready = False
         source_sample_rate: int | None = None
         resampler: StreamingAudioResampler | None = None
-        last_res = None
 
         # SSE supplies an accumulator for usage output. Raw-audio and WebSocket
         # streams retain terminal metrics only when their model adapter needs
@@ -2254,7 +2253,10 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 # off the final output; a cheap early-return on every other res).
                 if usage_acc is not None:
                     usage_acc.observe(res)
-                last_res = res
+                if on_final_metrics is not None:
+                    metrics = getattr(res, "metrics", None)
+                    if isinstance(metrics, dict) and metrics:
+                        on_final_metrics(metrics)
                 audio_output, audio_key = self._extract_audio_output(res)
                 if audio_key is None:
                     # Stash the aligner's timestamps output for streaming callers.
@@ -2369,10 +2371,6 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             # bytes, but they must terminate as an error rather than cleanly.
             if tts_params is not None and usage_acc is not None:
                 self._validate_tts_generation(tts_params, usage_acc)
-            if on_final_metrics is not None and last_res is not None:
-                metrics = getattr(last_res, "metrics", None) or {}
-                if metrics:
-                    on_final_metrics(metrics)
             self._mark_ref_audio_artifact_ready_for_request(request_id)
             artifact_ready = True
             total_ms = (time.perf_counter() - stream_start_s) * 1000.0
@@ -2462,7 +2460,18 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         final_metrics: dict[str, object] = {}
 
         def capture_final_metrics(metrics: dict[str, object]) -> None:
-            final_metrics.update(metrics)
+            stage_metrics = metrics.get("stage_metrics")
+            if isinstance(stage_metrics, dict):
+                accumulated_stage_metrics = final_metrics.setdefault("stage_metrics", {})
+                if isinstance(accumulated_stage_metrics, dict):
+                    accumulated_stage_metrics.update(stage_metrics)
+            final_metrics.update(
+                {
+                    key: value
+                    for key, value in metrics.items()
+                    if key != "stage_metrics"
+                }
+            )
 
         try:
             async for item in self._generate_audio_chunks(
@@ -2498,6 +2507,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 }
                 data = json.dumps(metrics_payload, separators=(",", ":"))
                 yield f"event: speech.metrics\ndata: {data}\n\n"
+            elif return_stage_metrics:
+                logger.warning(
+                    "Stage metrics were requested but unavailable for speech request %s",
+                    request_id,
+                )
             done_payload: dict[str, Any] = {"type": "speech.audio.done"}
             if request is not None:
                 # Streaming path: output_tokens = sum of stage-0 deltas.

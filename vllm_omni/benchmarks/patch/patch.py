@@ -1518,7 +1518,9 @@ async def async_request_openai_audio_speech(
                                     update_output_tokens=False,
                                 )
                             elif chunk_type == "speech.audio.error":
-                                raise RuntimeError(data.get("error") or "speech audio SSE error")
+                                error = data.get("error")
+                                message = error.get("message") if isinstance(error, dict) else error
+                                raise RuntimeError(message or "speech audio SSE error")
                 else:
                     async for chunk in response.content.iter_any():
                         if not chunk:
