@@ -155,7 +155,6 @@ def observe_modality_at_finalize(
 
     stage_label = str(stage_id)
     replica_label = str(replica_id)
-    gen_time_s = float(getattr(stage_metrics, "stage_gen_time_ms", 0.0)) / 1000.0
     mm_out = extract_mm_output(engine_outputs)
 
     sample_rate = defs.resolve_audio_sample_rate(mm_out)
