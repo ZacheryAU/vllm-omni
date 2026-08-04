@@ -22,7 +22,6 @@ Contents:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
 from prometheus_client import Counter, Histogram
