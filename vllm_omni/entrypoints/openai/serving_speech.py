@@ -2465,13 +2465,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 accumulated_stage_metrics = final_metrics.setdefault("stage_metrics", {})
                 if isinstance(accumulated_stage_metrics, dict):
                     accumulated_stage_metrics.update(stage_metrics)
-            final_metrics.update(
-                {
-                    key: value
-                    for key, value in metrics.items()
-                    if key != "stage_metrics"
-                }
-            )
+            final_metrics.update({key: value for key, value in metrics.items() if key != "stage_metrics"})
 
         try:
             async for item in self._generate_audio_chunks(

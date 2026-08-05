@@ -343,10 +343,7 @@ class OpenAICreateSpeechRequest(BaseModel):
     @model_validator(mode="after")
     def validate_streaming_constraints(self) -> "OpenAICreateSpeechRequest":
         if self.return_stage_metrics and not self.is_sse_stream():
-            raise ValueError(
-                "return_stage_metrics requires SSE streaming "
-                "(stream=true or stream_format='sse')."
-            )
+            raise ValueError("return_stage_metrics requires SSE streaming (stream=true or stream_format='sse').")
         if self.is_streaming():
             if self.response_format not in ("pcm", "wav"):
                 raise ValueError(
