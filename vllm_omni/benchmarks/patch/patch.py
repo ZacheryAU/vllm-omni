@@ -12,7 +12,7 @@ import traceback
 import uuid
 import wave
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -618,6 +618,7 @@ class MixRequestFuncOutput(RequestFuncOutput):
     audio_duration: float = 0.0
     audio_frames: int = 0
     audio_rtf: float = 0.0
+    audio_chunk_rtfs: list[float] = field(default_factory=list)
     image_count: int = 0
     image_generation_time_ms: float = 0.0
     image_pixels: int = 0
@@ -964,6 +965,7 @@ async def async_request_openai_chat_omni_completions(
         # to avoid repeated decode/concat.
         wav_pcm_buffer = bytearray()
         wav_audio_params: tuple[int, int, int] | None = None
+        previous_wav_chunk_arrival: float | None = None
         wav_inconsistent_chunk_count = 0
         first_inconsistent_wav_params: tuple[int, int, int] | None = None
         # For non-wav responses, accumulate encoded bytes then decode once.
@@ -980,6 +982,7 @@ async def async_request_openai_chat_omni_completions(
         output.audio_duration = 0.0
         output.audio_frames = 0
         output.audio_rtf = 0.0
+        output.audio_chunk_rtfs = []
         output.text_latency = 0.0
         output.output_tokens = 0
         output.error = ""
@@ -1079,9 +1082,19 @@ async def async_request_openai_chat_omni_completions(
                                                             if first_inconsistent_wav_params is None:
                                                                 first_inconsistent_wav_params = params
                                                             continue
-                                                        wav_pcm_buffer.extend(
-                                                            wav_reader.readframes(wav_reader.getnframes())
+                                                        chunk_frame_rate = wav_reader.getframerate()
+                                                        chunk_frames = wav_reader.getnframes()
+                                                        wav_pcm_buffer.extend(wav_reader.readframes(chunk_frames))
+                                                    if (
+                                                        previous_wav_chunk_arrival is not None
+                                                        and chunk_frame_rate > 0
+                                                        and chunk_frames > 0
+                                                    ):
+                                                        chunk_duration = chunk_frames / float(chunk_frame_rate)
+                                                        output.audio_chunk_rtfs.append(
+                                                            (timestamp - previous_wav_chunk_arrival) / chunk_duration
                                                         )
+                                                    previous_wav_chunk_arrival = timestamp
                                                 except Exception as ex:
                                                     logger.warning("Failed to parse wav audio chunk: %s", ex)
                                             else:

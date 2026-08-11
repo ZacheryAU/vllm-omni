@@ -14,6 +14,13 @@ _PERCENTILE_ROWS_TYPE = list[tuple[float, float]] | None
 _FLOAT_LIST_TYPE = list[float]
 _INT_LIST_TYPE = list[int]
 
+_AUDIO_CHUNK_RTF = "audio_chunk_rtf"
+_AUDIO_CHUNK_RTFS = "audio_chunk_rtfs"
+_MEAN_AUDIO_CHUNK_RTF = f"mean_{_AUDIO_CHUNK_RTF}"
+_MEDIAN_AUDIO_CHUNK_RTF = f"median_{_AUDIO_CHUNK_RTF}"
+_STD_AUDIO_CHUNK_RTF = f"std_{_AUDIO_CHUNK_RTF}"
+_PERCENTILES_AUDIO_CHUNK_RTF = f"percentiles_{_AUDIO_CHUNK_RTF}"
+
 _MULTIMODAL_BENCHMARK_FIELDS = [
     (defs.MEAN_AUDIO_TTFP_MS, float, field(default=0.0)),
     (defs.MEDIAN_AUDIO_TTFP_MS, float, field(default=0.0)),
@@ -26,6 +33,10 @@ _MULTIMODAL_BENCHMARK_FIELDS = [
     (defs.MEDIAN_AUDIO_RTF, float, field(default=0.0)),
     (defs.STD_AUDIO_RTF, float, field(default=0.0)),
     (defs.PERCENTILES_AUDIO_RTF, _PERCENTILE_ROWS_TYPE, field(default=None)),
+    (_MEAN_AUDIO_CHUNK_RTF, float, field(default=0.0)),
+    (_MEDIAN_AUDIO_CHUNK_RTF, float, field(default=0.0)),
+    (_STD_AUDIO_CHUNK_RTF, float, field(default=0.0)),
+    (_PERCENTILES_AUDIO_CHUNK_RTF, _PERCENTILE_ROWS_TYPE, field(default=None)),
     (defs.MEAN_AUDIO_DURATION_S, float, field(default=0.0)),
     (defs.MEDIAN_AUDIO_DURATION_S, float, field(default=0.0)),
     (defs.STD_AUDIO_DURATION_S, float, field(default=0.0)),
@@ -118,6 +129,11 @@ _AGGREGATE_PERCENTILE_FIELD_NAMES = {
         defs.MEAN_AUDIO_RTF,
         defs.MEDIAN_AUDIO_RTF,
         defs.PERCENTILES_AUDIO_RTF,
+    ),
+    _AUDIO_CHUNK_RTF: (
+        _MEAN_AUDIO_CHUNK_RTF,
+        _MEDIAN_AUDIO_CHUNK_RTF,
+        _PERCENTILES_AUDIO_CHUNK_RTF,
     ),
     defs.AUDIO_DURATION: (
         defs.MEAN_AUDIO_DURATION_S,
@@ -271,6 +287,8 @@ def print_audio_metrics(selected_percentile_metrics, metrics: MultiModalsBenchma
     for metric in selected_percentile_metrics:
         if metric.startswith("audio"):
             process_one_metric(metric, metrics)
+            if metric == defs.AUDIO_RTF:
+                process_one_metric(_AUDIO_CHUNK_RTF, metrics)
 
 
 def print_image_metrics(selected_percentiles: list[float], metrics: MultiModalsBenchmarkMetrics):
@@ -315,6 +333,7 @@ def process_one_metric(
         "e2el": "End-to-end Latency",
         defs.AUDIO_TTFP: "Time to First Packet",
         defs.AUDIO_RTF: "Real Time Factor",
+        _AUDIO_CHUNK_RTF: "Chunk Real Time Factor",
         defs.AUDIO_DURATION: "Audio Duration",
         defs.AUDIO_UNDERRUN: "Streaming Audio Underrun",
     }
@@ -322,7 +341,7 @@ def process_one_metric(
     header = metric_header_map.get(metric_attribute_name, metric_attribute_name)
     print("{s:{c}^{n}}".format(s=header, n=50, c="-"))
 
-    is_audio_rtf = metric_attribute_name == defs.AUDIO_RTF
+    is_audio_rtf = metric_attribute_name in (defs.AUDIO_RTF, _AUDIO_CHUNK_RTF)
     is_audio_duration_or_underrun = metric_attribute_name in (defs.AUDIO_DURATION, defs.AUDIO_UNDERRUN)
 
     suffix = "_ms"
@@ -723,6 +742,7 @@ def calculate_metrics(
     e2els: list[float] = []
     audio_ttfps: list[float] = []
     audio_rtfs: list[float] = []
+    audio_chunk_rtfs: list[float] = []
     audio_duration: list[float] = []
     audio_frames: list[int] = []
     image_generation_times_ms: list[float] = []
@@ -769,6 +789,7 @@ def calculate_metrics(
             ttfts.append(outputs[i].ttft)
             audio_ttfps.append(getattr(outputs[i], defs.AUDIO_TTFP, 0.0))
             audio_rtfs.append(getattr(outputs[i], defs.AUDIO_RTF, 0.0))
+            audio_chunk_rtfs.extend(getattr(outputs[i], _AUDIO_CHUNK_RTFS, None) or [])
             audio_duration.append(getattr(outputs[i], defs.AUDIO_DURATION, 0.0))
             audio_frames.append(getattr(outputs[i], defs.AUDIO_FRAMES, 0.0))
             image_count = int(getattr(outputs[i], defs.IMAGE_COUNT, 0) or 0)
@@ -929,6 +950,10 @@ def calculate_metrics(
             defs.STD_AUDIO_RTF: np.std(audio_rtfs or 0),
             defs.MEDIAN_AUDIO_RTF: np.median(audio_rtfs or 0),
             defs.PERCENTILES_AUDIO_RTF: [(p, np.percentile(audio_rtfs or 0, p)) for p in selected_percentiles],
+            _MEAN_AUDIO_CHUNK_RTF: np.mean(audio_chunk_rtfs or 0),
+            _STD_AUDIO_CHUNK_RTF: np.std(audio_chunk_rtfs or 0),
+            _MEDIAN_AUDIO_CHUNK_RTF: np.median(audio_chunk_rtfs or 0),
+            _PERCENTILES_AUDIO_CHUNK_RTF: [(p, np.percentile(audio_chunk_rtfs or 0, p)) for p in selected_percentiles],
             defs.TOTAL_IMAGES: total_images,
             defs.IMAGE_THROUGHPUT: total_images / dur_s,
             defs.AVERAGE_PIXELS_PER_IMAGE: (total_image_pixels / total_images) if total_images > 0 else 0.0,
