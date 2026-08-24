@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ from vllm_omni.entrypoints.openai.video_api_utils import (
     encode_video_base64,
 )
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
+from vllm_omni.metrics import count_video_frames
 from vllm_omni.model_extras import should_preserve_reference_image_size
 from vllm_omni.outputs.output_metadata import (
     DiffusionMetadataMapping,
@@ -88,38 +89,6 @@ class VideoGenerationArtifacts:
     metrics: dict[str, object] | None = None
 
 
-def _count_video_frames(video: object) -> int | None:
-    if isinstance(video, Mapping):
-        for key in ("video", "frames", "images"):
-            if key in video:
-                return _count_video_frames(video[key])
-        return None
-
-    if isinstance(video, (list, tuple)):
-        return len(video)
-
-    shape = getattr(video, "shape", None)
-    if shape is None:
-        return None
-    try:
-        dims = tuple(int(dim) for dim in shape)
-    except (TypeError, ValueError):
-        return None
-
-    if len(dims) == 5:
-        # Common layouts: [B, C, F, H, W] and [B, F, H, W, C].
-        if dims[1] in (1, 3, 4):
-            return dims[2]
-        return dims[1]
-    if len(dims) == 4:
-        # Common layouts: [F, H, W, C] and [C, F, H, W].
-        if dims[0] in (1, 3, 4):
-            return dims[1]
-        return dims[0]
-
-    return None
-
-
 def _video_metadata_from_artifacts(artifacts: VideoGenerationArtifacts) -> dict[str, object]:
     metadata: dict[str, object] = {}
     if artifacts.output_fps > 0:
@@ -128,7 +97,7 @@ def _video_metadata_from_artifacts(artifacts: VideoGenerationArtifacts) -> dict[
     if not artifacts.videos:
         return metadata
 
-    num_frames = _count_video_frames(artifacts.videos[0])
+    num_frames = count_video_frames(artifacts.videos[0])
     if num_frames is not None and num_frames > 0:
         metadata["num_frames"] = num_frames
         if artifacts.output_fps > 0:

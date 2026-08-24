@@ -92,7 +92,7 @@ from vllm_omni.experimental.fullduplex.client import (
     wait_for,
 )
 from vllm_omni.metrics import definitions as defs
-from vllm_omni.metrics.utils import coerce_positive_int_scalar
+from vllm_omni.metrics.utils import coerce_positive_float_scalar, coerce_positive_int_scalar
 
 logger = init_logger(__name__)
 
@@ -904,32 +904,24 @@ def _apply_chat_stage0_token_timings(output: MixRequestFuncOutput) -> bool:
     )
 
 
-def _coerce_positive_float(value: object) -> float:
-    try:
-        coerced = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    return coerced if coerced > 0 else 0.0
-
-
 def _peak_memory_mb_from_payload(data: Mapping[str, object]) -> float:
-    peak_memory_mb = _coerce_positive_float(data.get(defs.PEAK_MEMORY_MB))
-    if peak_memory_mb > 0:
+    peak_memory_mb = coerce_positive_float_scalar(data.get(defs.PEAK_MEMORY_MB))
+    if peak_memory_mb is not None:
         return peak_memory_mb
 
     for key in ("metrics", "usage"):
         nested = data.get(key)
         if isinstance(nested, dict):
-            peak_memory_mb = _coerce_positive_float(nested.get(defs.PEAK_MEMORY_MB))
-            if peak_memory_mb > 0:
+            peak_memory_mb = coerce_positive_float_scalar(nested.get(defs.PEAK_MEMORY_MB))
+            if peak_memory_mb is not None:
                 return peak_memory_mb
 
     response_data = data.get("data")
     if isinstance(response_data, list):
         for item in response_data:
             if isinstance(item, dict):
-                peak_memory_mb = _coerce_positive_float(item.get(defs.PEAK_MEMORY_MB))
-                if peak_memory_mb > 0:
+                peak_memory_mb = coerce_positive_float_scalar(item.get(defs.PEAK_MEMORY_MB))
+                if peak_memory_mb is not None:
                     return peak_memory_mb
 
     choices = data.get("choices")
@@ -948,8 +940,8 @@ def _peak_memory_mb_from_payload(data: Mapping[str, object]) -> float:
                 if isinstance(content, list):
                     for item in content:
                         if isinstance(item, dict):
-                            peak_memory_mb = _coerce_positive_float(item.get(defs.PEAK_MEMORY_MB))
-                            if peak_memory_mb > 0:
+                            peak_memory_mb = coerce_positive_float_scalar(item.get(defs.PEAK_MEMORY_MB))
+                            if peak_memory_mb is not None:
                                 return peak_memory_mb
     return 0.0
 
@@ -1079,14 +1071,6 @@ _VIDEO_FORM_FIELDS = (
 )
 
 
-def _coerce_float(value: object) -> float | None:
-    try:
-        coerced = float(value)
-    except (TypeError, ValueError):
-        return None
-    return coerced
-
-
 def _video_generation_ms_from_stage_durations(stage_durations: object) -> float:
     if not isinstance(stage_durations, dict):
         return 0.0
@@ -1099,21 +1083,21 @@ def _video_generation_ms_from_stage_durations(stage_durations: object) -> float:
 
 
 def _video_duration_from_payload(data: Mapping[str, object], request_body: Mapping[str, object]) -> float:
-    duration_s = _coerce_float(data.get("duration_s"))
+    duration_s = coerce_positive_float_scalar(data.get("duration_s"))
     if duration_s is not None and duration_s > 0:
         return duration_s
 
-    num_frames = _coerce_float(data.get("num_frames"))
-    fps = _coerce_float(data.get("fps"))
+    num_frames = coerce_positive_float_scalar(data.get("num_frames"))
+    fps = coerce_positive_float_scalar(data.get("fps"))
     if num_frames is not None and fps is not None and num_frames > 0 and fps > 0:
         return num_frames / fps
 
-    seconds = _coerce_float(request_body.get("seconds"))
+    seconds = coerce_positive_float_scalar(request_body.get("seconds"))
     if seconds is not None and seconds > 0:
         return seconds
 
-    num_frames = _coerce_float(request_body.get("num_frames"))
-    fps = _coerce_float(request_body.get("fps"))
+    num_frames = coerce_positive_float_scalar(request_body.get("num_frames"))
+    fps = coerce_positive_float_scalar(request_body.get("fps"))
     if num_frames is not None and fps is not None and num_frames > 0 and fps > 0:
         return num_frames / fps
 
@@ -1129,8 +1113,8 @@ def _video_frames_from_payload(data: Mapping[str, object], request_body: Mapping
         if num_frames is not None:
             return num_frames
 
-    duration_s = _coerce_float(data.get("duration_s"))
-    fps = _coerce_float(data.get("fps"))
+    duration_s = coerce_positive_float_scalar(data.get("duration_s"))
+    fps = coerce_positive_float_scalar(data.get("fps"))
     if duration_s is not None and fps is not None and duration_s > 0 and fps > 0:
         return int(round(duration_s * fps))
 
@@ -1138,8 +1122,8 @@ def _video_frames_from_payload(data: Mapping[str, object], request_body: Mapping
     if num_frames is not None:
         return num_frames
 
-    seconds = _coerce_float(request_body.get("seconds"))
-    fps = _coerce_float(request_body.get("fps"))
+    seconds = coerce_positive_float_scalar(request_body.get("seconds"))
+    fps = coerce_positive_float_scalar(request_body.get("fps"))
     if seconds is not None and fps is not None and seconds > 0 and fps > 0:
         return int(round(seconds * fps))
 
@@ -1221,7 +1205,7 @@ def _apply_video_metrics_from_payload(
     stage_durations = data.get("stage_durations")
     stage_gen_ms = _video_generation_ms_from_stage_durations(stage_durations)
     if stage_gen_ms <= 0:
-        inference_time_s = _coerce_float(data.get("inference_time_s"))
+        inference_time_s = coerce_positive_float_scalar(data.get("inference_time_s"))
         if inference_time_s is not None and inference_time_s > 0:
             stage_gen_ms = inference_time_s * 1000.0
     output.video_generation_time_ms = max(output.video_generation_time_ms, stage_gen_ms)
