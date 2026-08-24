@@ -227,43 +227,6 @@ def coerce_positive_float_scalar(value: object) -> float | None:
     return value if value > 0 else None
 
 
-def count_video_frames(video: object) -> int | None:
-    """Return the frame count for common nested and tensor video layouts."""
-    if isinstance(video, Mapping):
-        for key in ("video", "frames", "images"):
-            if key in video:
-                return count_video_frames(video[key])
-        return None
-
-    if isinstance(video, (list, tuple)):
-        return len(video)
-
-    shape = getattr(video, "shape", None)
-    if shape is None:
-        return None
-    try:
-        dims = tuple(int(dim) for dim in shape)
-    except (TypeError, ValueError):
-        return None
-
-    if len(dims) == 5:
-        # Common layouts: [B, C, F, H, W] and [B, F, H, W, C].
-        if dims[-1] in (1, 3, 4):
-            return dims[1]
-        if dims[1] in (1, 3, 4):
-            return dims[2]
-        return dims[1]
-    if len(dims) == 4:
-        # Common layouts: [F, H, W, C] and [C, F, H, W].
-        if dims[-1] in (1, 3, 4):
-            return dims[0]
-        if dims[0] in (1, 3, 4):
-            return dims[1]
-        return dims[0]
-
-    return None
-
-
 def resolve_int_by_sequential_keys(
     source: Mapping[str, object] | object | None,
     keys: Sequence[str],
@@ -433,6 +396,43 @@ def count_image_pixels(value: object) -> int:
     if len(dims) == 3 and dims[-1] in (1, 3, 4):
         return dims[0] * dims[1]
     return dims[-2] * dims[-1]
+
+
+def count_video_frames(video: object) -> int | None:
+    """Return the frame count for common nested and tensor video layouts."""
+    if isinstance(video, Mapping):
+        for key in ("video", "frames", "images"):
+            if key in video:
+                return count_video_frames(video[key])
+        return None
+
+    if isinstance(video, (list, tuple)):
+        return len(video)
+
+    shape = getattr(video, "shape", None)
+    if shape is None:
+        return None
+    try:
+        dims = tuple(int(dim) for dim in shape)
+    except (TypeError, ValueError):
+        return None
+
+    if len(dims) == 5:
+        # Common layouts: [B, C, F, H, W] and [B, F, H, W, C].
+        if dims[-1] in (1, 3, 4):
+            return dims[1]
+        if dims[1] in (1, 3, 4):
+            return dims[2]
+        return dims[1]
+    if len(dims) == 4:
+        # Common layouts: [F, H, W, C] and [C, F, H, W].
+        if dims[-1] in (1, 3, 4):
+            return dims[0]
+        if dims[0] in (1, 3, 4):
+            return dims[1]
+        return dims[0]
+
+    return None
 
 
 def _build_field_defs(

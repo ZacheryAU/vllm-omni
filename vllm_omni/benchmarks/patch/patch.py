@@ -998,9 +998,10 @@ def _image_generation_ms_from_content(content: object) -> float:
     return 0.0
 
 
-def _image_pixels_from_response_data(content: object) -> int:
+def _image_info_from_response_data(content: object) -> tuple[int, int]:
     if not isinstance(content, list):
-        return 0
+        return 0, 0
+    image_count = 0
     total_pixels = 0
     for item in content:
         if not isinstance(item, dict):
@@ -1009,26 +1010,29 @@ def _image_pixels_from_response_data(content: object) -> int:
         if not isinstance(b64_json, str) or not b64_json:
             continue
         try:
-            with Image.open(io.BytesIO(base64.b64decode(b64_json))) as img:
+            with Image.open(io.BytesIO(base64.b64decode(b64_json, validate=True))) as img:
                 width, height = img.size
+                img.verify()
+                image_count += 1
                 total_pixels += int(width) * int(height)
         except Exception:
-            logger.debug("Failed to decode generated image for pixel counting", exc_info=True)
-    return total_pixels
+            logger.debug("Failed to decode generated image payload", exc_info=True)
+    return image_count, total_pixels
 
 
-def _apply_image_metrics_from_payload(output: MixRequestFuncOutput, data: Mapping[str, object]) -> None:
+def _apply_image_metrics_from_payload(output: MixRequestFuncOutput, data: Mapping[str, object]) -> int:
     """Populate image benchmark fields from an OpenAI-compatible image payload."""
     _update_output_stage_metrics_from_payload(output, data, update_output_tokens=False)
     _update_output_peak_memory_from_payload(output, data)
 
+    payload_image_count = 0
     response_data = data.get("data")
     if isinstance(response_data, list):
-        output.image_count = max(output.image_count, len(response_data))
+        payload_image_count, content_image_pixels = _image_info_from_response_data(response_data)
+        output.image_count = max(output.image_count, payload_image_count)
         content_image_ms = _image_generation_ms_from_content(response_data)
         if content_image_ms > 0:
             output.image_generation_time_ms = max(output.image_generation_time_ms, content_image_ms)
-        content_image_pixels = _image_pixels_from_response_data(response_data)
         if content_image_pixels > 0:
             output.image_pixels = max(output.image_pixels, content_image_pixels)
 
@@ -1046,6 +1050,7 @@ def _apply_image_metrics_from_payload(output: MixRequestFuncOutput, data: Mappin
         output.image_pixels = metrics_image_pixels
     if metrics_denoise_step_ms > output.denoise_step_latency_ms:
         output.denoise_step_latency_ms = metrics_denoise_step_ms
+    return payload_image_count
 
 
 _VIDEO_FORM_FIELDS = (
@@ -1607,10 +1612,16 @@ async def async_request_openai_image_generations_omni(
             output.latency = time.perf_counter() - st
             if response.status == 200:
                 data = await response.json()
-                _apply_image_metrics_from_payload(output, data)
-                if output.image_count <= 0:
-                    output.image_count = int(payload.get("n") or 1)
-                output.success = True
+                if not isinstance(data, Mapping):
+                    output.error = "HTTP 200 response did not contain a JSON object"
+                    output.success = False
+                else:
+                    payload_image_count = _apply_image_metrics_from_payload(output, data)
+                    if payload_image_count <= 0:
+                        output.error = "HTTP 200 response did not contain a valid image payload"
+                        output.success = False
+                    else:
+                        output.success = True
             else:
                 output.error = f"HTTP {response.status}: {await response.text()}"
                 output.success = False
