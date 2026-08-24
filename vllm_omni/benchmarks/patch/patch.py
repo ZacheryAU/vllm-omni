@@ -1125,7 +1125,7 @@ def _video_frames_from_payload(data: Mapping[str, object], request_body: Mapping
         value = data.get(key)
         if isinstance(value, list):
             return len(value)
-        num_frames = _coerce_positive_int(value)
+        num_frames = coerce_positive_int_scalar(value)
         if num_frames is not None:
             return num_frames
 
@@ -1134,7 +1134,7 @@ def _video_frames_from_payload(data: Mapping[str, object], request_body: Mapping
     if duration_s is not None and fps is not None and duration_s > 0 and fps > 0:
         return int(round(duration_s * fps))
 
-    num_frames = _coerce_positive_int(request_body.get("num_frames"))
+    num_frames = coerce_positive_int_scalar(request_body.get("num_frames"))
     if num_frames is not None:
         return num_frames
 
