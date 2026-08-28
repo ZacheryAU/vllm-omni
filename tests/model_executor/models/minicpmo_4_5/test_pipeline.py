@@ -230,7 +230,7 @@ class TestDeployTopology:
         )
 
     def test_no_async_chunk_selects_full_payload_processor(self) -> None:
-        deploy = load_deploy_config(_DEPLOY_DIR / "minicpmo_4_5_batching.yaml")
+        deploy = load_deploy_config(_DEPLOY_DIR / "minicpmo_4_5.yaml")
         deploy.async_chunk = False
         stages = merge_pipeline_deploy(OMNI_PIPELINES[_PIPELINE_KEY], deploy)
 
