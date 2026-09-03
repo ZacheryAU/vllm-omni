@@ -117,15 +117,13 @@ _STREAMING_OUTPUT_UNIT_TYPES = frozenset(
     }
 )
 
-_OPENAI_AUDIO_SPEECH_BACKEND = "openai-audio-speech"
-
 
 def _is_audio_speech_without_text_output(
     backend: str | None,
     metrics: MultiModalsBenchmarkMetrics,
 ) -> bool:
     """``openai-audio-speech`` bench with no user-facing generated text tokens."""
-    return backend == _OPENAI_AUDIO_SPEECH_BACKEND and metrics.total_output == 0
+    return backend == "openai-audio-speech" and metrics.total_output == 0
 
 
 _AGGREGATE_PERCENTILE_FIELD_NAMES = {
