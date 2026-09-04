@@ -186,8 +186,10 @@ def _stage_modality_flags(
 ) -> tuple[bool, bool, bool, bool, bool]:
     is_text_stage = final_output_type == "text" or output_unit_type == "text"
     is_audio_stage = final_output_type == "audio" or output_unit_type == "audio"
-    is_image_stage = final_output_type in {"image", "images"} or output_unit_type == "image"
     is_video_stage = final_output_type in {"video", "videos"} or output_unit_type == "video"
+    # Video diffusion may still report output_unit_type="image" when frames are
+    # stored in ``images``; prefer video when final_output_type says so.
+    is_image_stage = (not is_video_stage) and (final_output_type in {"image", "images"} or output_unit_type == "image")
     is_internal_stream_stage = (
         output_unit_type in _STREAMING_OUTPUT_UNIT_TYPES and not is_text_stage and not is_audio_stage
     )
@@ -638,12 +640,12 @@ def print_stage_metrics(
     ) = _stage_modality_flags(getattr(sm, "final_output_type"), getattr(sm, "output_unit_type"))
 
     print("{s:{c}^{n}}".format(s=title, n=50, c="="))
-    if is_image_stage:
-        _print_image_stage_metrics(selected_percentiles, sm)
-        return
-
     if is_video_stage:
         _print_video_stage_metrics(selected_percentiles, sm)
+        return
+
+    if is_image_stage:
+        _print_image_stage_metrics(selected_percentiles, sm)
         return
 
     _print_stage_timing(sm, selected_percentiles)
