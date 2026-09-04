@@ -265,6 +265,11 @@ def print_metrics(
 
 
 def print_text_metrics(task_type, selected_percentile_metrics, metrics: MultiModalsBenchmarkMetrics):
+    # Pure image/video runs have no user-facing text tokens; skip the whole
+    # Text Result section (token throughput / peak would be misleading).
+    if metrics.total_output <= 0 and (_has_image_output(metrics) or _has_video_output(metrics)):
+        return
+
     print("{s:{c}^{n}}".format(s=" Text Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
     if isinstance(metrics, MultiModalsBenchmarkMetrics):
@@ -859,7 +864,18 @@ def calculate_metrics(
             output_len = outputs[i].output_tokens
 
             if not output_len:
-                if tokenizer is None:
+                # Pure image/video (no generated text) must stay at 0 tokens.
+                # Do not invent output_len=1 via the tokenizer-is-None placeholder.
+                generated_text = getattr(outputs[i], "generated_text", None) or ""
+                has_image = int(getattr(outputs[i], defs.IMAGE_COUNT, 0) or 0) > 0
+                has_video = (
+                    float(getattr(outputs[i], defs.VIDEO_DURATION, 0.0) or 0.0) > 0.0
+                    or int(getattr(outputs[i], defs.VIDEO_FRAMES, 0) or 0) > 0
+                    or float(getattr(outputs[i], defs.VIDEO_GENERATION_TIME_MS, 0.0) or 0.0) > 0.0
+                )
+                if not generated_text and (has_image or has_video):
+                    output_len = 0
+                elif tokenizer is None:
                     output_len = 1
                 else:
                     # We use the tokenizer to count the number of output tokens
@@ -1002,18 +1018,24 @@ def calculate_metrics(
                 token_timeline_available = False
             else:
                 # Calculate token generation timestamp using
-                # start_time, ttft, and itl
-                token_times = [output.start_time + output.ttft]
-                current_time = token_times[0]
-                for itl_value in output.itl:
-                    current_time += itl_value
-                    token_times.append(current_time)
+                # start_time, ttft, and itl. Skip requests with no text tokens
+                # (empty itl, zero output_tokens, and no generated_text) so pure
+                # image/video runs do not seed a fake peak of 1 tok/s from
+                # start_time+ttft alone.
+                output_token_count = int(getattr(output, "output_tokens", 0) or 0)
+                has_generated_text = bool(getattr(output, "generated_text", None) or "")
+                if output_token_count > 0 or output.itl or has_generated_text:
+                    token_times = [output.start_time + output.ttft]
+                    current_time = token_times[0]
+                    for itl_value in output.itl:
+                        current_time += itl_value
+                        token_times.append(current_time)
 
-                # Add tokens to second buckets
-                for token_time in token_times:
-                    second_bucket = int(token_time - min_start_time)
-                    if 0 <= second_bucket < duration_seconds:
-                        tokens_per_second[second_bucket] += 1
+                    # Add tokens to second buckets
+                    for token_time in token_times:
+                        second_bucket = int(token_time - min_start_time)
+                        if 0 <= second_bucket < duration_seconds:
+                            tokens_per_second[second_bucket] += 1
 
             # Track concurrent requests for each second this request was active
             request_start_second = int(output.start_time - min_start_time)
