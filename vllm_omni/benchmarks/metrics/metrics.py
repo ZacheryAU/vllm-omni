@@ -126,6 +126,23 @@ def _is_audio_speech_without_text_output(
     return backend == "openai-audio-speech" and metrics.total_output == 0
 
 
+def _is_zero_text_result(output: RequestFuncOutput, backend: str | None) -> bool:
+    """True when a successful request produced no user-facing generated text.
+
+    Must run *before* the tokenizer-is-None ``output_len = 1`` placeholder, or
+    tokenizer-free speech / TTS runs invent a token and leak text metrics.
+    """
+    generated_text = getattr(output, "generated_text", None) or ""
+    if generated_text:
+        return False
+    if backend == "openai-audio-speech":
+        return True
+    return (
+        float(getattr(output, defs.AUDIO_DURATION, 0.0) or 0.0) > 0
+        or int(getattr(output, defs.AUDIO_FRAMES, 0) or 0) > 0
+    )
+
+
 _AGGREGATE_PERCENTILE_FIELD_NAMES = {
     defs.AUDIO_TTFP: (
         defs.MEAN_AUDIO_TTFP_MS,
@@ -782,7 +799,12 @@ def calculate_metrics(
             output_len = outputs[i].output_tokens
 
             if not output_len:
-                if tokenizer is None:
+                # Zero-text (pure TTS / tokenizer-free speech) must stay 0.
+                # The tokenizer-is-None placeholder of 1 is only for text
+                # runs that produced tokens we cannot count.
+                if _is_zero_text_result(outputs[i], backend):
+                    output_len = 0
+                elif tokenizer is None:
                     output_len = 1
                 else:
                     # We use the tokenizer to count the number of output tokens
