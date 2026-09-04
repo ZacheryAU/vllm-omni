@@ -1214,7 +1214,14 @@ def _apply_video_metrics_from_payload(
         if inference_time_s is not None and inference_time_s > 0:
             stage_gen_ms = inference_time_s * 1000.0
     output.video_generation_time_ms = max(output.video_generation_time_ms, stage_gen_ms)
-    if output.video_duration > 0 and output.latency > 0:
+    if output.video_duration <= 0:
+        return
+    # Prefer server-reported generation time so RTF is independent of client
+    # poll_interval_s sleep/overshoot baked into output.latency.
+    generation_s = output.video_generation_time_ms / 1000.0
+    if generation_s > 0:
+        output.video_rtf = generation_s / output.video_duration
+    elif output.latency > 0:
         output.video_rtf = output.latency / output.video_duration
 
 
