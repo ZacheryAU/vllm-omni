@@ -99,6 +99,7 @@ _AUDIO_CONTINUITY_THRESHOLD_ENV = "VLLM_OMNI_BENCH_AUDIO_CONTINUITY_THRESHOLD_S"
 RETURN_STAGE_METRICS_FIELD = "return_stage_metrics"
 _IMAGE_STAGE_METRICS_BACKENDS = frozenset({"openai-image-edits-omni"})
 _PRINT_STAGE = False
+DIFFUSION_TTS_STAGE_OMITTED_MSG = "Stage Benchmark Result of diffusion TTS omitted."
 
 
 def maybe_enable_stage_metrics(extra_body: dict[str, Any] | None, *, enabled: bool) -> dict[str, Any] | None:
@@ -139,6 +140,32 @@ def set_print_stage(enabled: bool) -> None:
     """Set whether this benchmark run prints the stage benchmark section."""
     global _PRINT_STAGE
     _PRINT_STAGE = bool(enabled)
+
+
+def _content_type_is_audio(content_type: str | None) -> bool:
+    """True when Content-Type is an audio/* body rather than text/event-stream."""
+    if not content_type:
+        return False
+    return content_type.split(";", 1)[0].strip().lower().startswith("audio/")
+
+
+def _outputs_have_stage_metrics(outputs: list) -> bool:
+    """True when at least one result carried a non-empty stage snapshot."""
+    return any(isinstance(getattr(o, "stage_metrics", None), dict) and o.stage_metrics for o in outputs)
+
+
+def _should_print_diffusion_stage_omitted(print_stage: bool, outputs: list) -> bool:
+    """True when --print-stage ran against diffusion TTS that returned audio/*."""
+    return bool(
+        print_stage
+        and not _outputs_have_stage_metrics(outputs)
+        and any(getattr(o, "audio_body_without_stage_metrics", False) for o in outputs)
+    )
+
+
+def _print_diffusion_stage_omitted() -> None:
+    """Print a one-liner after Serving Benchmark Result when stage data is absent."""
+    print(f"\n{DIFFUSION_TTS_STAGE_OMITTED_MSG}")
 
 
 def _audio_continuity_threshold_s() -> float:
@@ -680,6 +707,9 @@ class MixRequestFuncOutput(RequestFuncOutput):
     final_output_type: str | None = None
     duplex_request_metrics: list[dict[str, object]] | None = None
     duplex_session_metrics: dict[str, object] | None = None
+    #: Set when --print-stage requested SSE but the server returned audio/*
+    #: (diffusion TTS such as OmniVoice does not emit speech.metrics).
+    audio_body_without_stage_metrics: bool = False
 
 
 _IMAGE_EDITS_EXTRA_BODY_FORM_FIELDS = (
@@ -1418,6 +1448,8 @@ async def async_request_openai_audio_speech(
     TTFP (time to first audio packet) separately from E2EL.
     When stage metrics are requested, switches to speech SSE events
     so metrics do not get mixed into the audio byte stream.
+    If the server still returns ``audio/*`` (diffusion TTS such as OmniVoice),
+    the body is parsed as raw PCM instead of JSON.
     """
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "OpenAI Audio Speech API", "audio/speech")
@@ -1492,7 +1524,13 @@ async def async_request_openai_audio_speech(
     try:
         async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == 200:
-                if payload.get("stream_format") == "sse":
+                content_type = response.headers.get("Content-Type", "")
+                requested_sse = payload.get("stream_format") == "sse"
+                # Diffusion TTS (e.g. OmniVoice) ignores SSE / stage metrics and
+                # returns a single audio/* body. Parse that as raw PCM instead of
+                # json.loads on binary.
+                parse_as_sse = requested_sse and not _content_type_is_audio(content_type)
+                if parse_as_sse:
                     handler = StreamedResponseHandler()
                     async for chunk_bytes in response.content.iter_any():
                         if not chunk_bytes:
@@ -1522,6 +1560,13 @@ async def async_request_openai_audio_speech(
                                 message = error.get("message") if isinstance(error, dict) else error
                                 raise RuntimeError(message or "speech audio SSE error")
                 else:
+                    if requested_sse:
+                        output.audio_body_without_stage_metrics = True
+                        logger.warning(
+                            "Requested speech SSE/stage metrics but server returned %s; "
+                            "parsing as raw audio (diffusion TTS does not emit speech.metrics).",
+                            content_type,
+                        )
                     async for chunk in response.content.iter_any():
                         if not chunk:
                             continue
@@ -2248,6 +2293,7 @@ async def benchmark(
     omniinteract_summary = _finalize_omniinteract_batch(input_requests, outputs)
 
     if task_type == TaskType.GENERATION:
+        have_stage = _outputs_have_stage_metrics(outputs)
         metrics, actual_output_lens = calculate_metrics(
             input_requests=input_requests,
             outputs=outputs,
@@ -2260,9 +2306,11 @@ async def benchmark(
             max_concurrency=max_concurrency,
             request_rate=request_rate,
             benchmark_duration=benchmark_duration,
-            print_stage=_PRINT_STAGE,
+            print_stage=_PRINT_STAGE and have_stage,
             backend=endpoint_type,
         )
+        if _should_print_diffusion_stage_omitted(_PRINT_STAGE, outputs):
+            _print_diffusion_stage_omitted()
     else:
         metrics = calculate_metrics_for_embeddings(
             outputs=outputs,

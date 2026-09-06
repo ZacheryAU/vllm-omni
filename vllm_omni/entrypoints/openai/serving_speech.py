@@ -3467,12 +3467,27 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         self,
         request: OpenAICreateSpeechRequest,
     ) -> Response:
-        """Handle speech generation for pure diffusion TTS models (e.g. OmniVoice)."""
+        """Handle speech generation for pure diffusion TTS models (e.g. OmniVoice).
+
+        OmniVoice is request-mode (one ``forward()``), so this path never emits
+        ``speech.audio.*`` SSE or ``speech.metrics``. Streaming / stage-metric
+        flags are ignored and a single audio body is returned so ``--print-stage``
+        benches still collect e2e audio metrics instead of failing with HTTP 400.
+        """
         from vllm_omni.outputs import OmniRequestOutput
 
         try:
             if not request.input or not request.input.strip():
                 raise ValueError("Input text cannot be empty")
+
+            if request.is_sse_stream() or request.return_stage_metrics:
+                logger.warning(
+                    "Diffusion TTS does not emit speech SSE events or stage metrics; "
+                    "ignoring stream_format=%r return_stage_metrics=%s and returning "
+                    "a single audio body",
+                    request.stream_format,
+                    request.return_stage_metrics,
+                )
 
             if request.ref_audio is not None:
                 fmt_err = self._validate_ref_audio_format(request.ref_audio)
@@ -3652,6 +3667,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             return self.create_error_response(sample_rate_error)
 
         if self._diffusion_mode:
+            # Soft-reject SSE / return_stage_metrics: still 200 + audio.
             return await self._create_diffusion_speech(request)
 
         error_check_ret = await self._check_model(request)

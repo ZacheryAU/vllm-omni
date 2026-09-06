@@ -527,9 +527,10 @@ are requested:
 - Default: `stream=true`, `stream_format=audio`, `response_format=pcm` (raw PCM,
   used for audio TTFP).
 - With `--print-stage`: the client sets `return_stage_metrics=true` and switches
-  to `stream_format=sse`, then reads `speech.metrics` from the SSE stream. See
+  to `stream_format=sse`, then reads stage metrics from the SSE stream. See
   the speech API [SSE stream](../../serving/speech_api.md#response-format)
-  contract.
+  contract. Diffusion TTS (for example OmniVoice) still returns a single audio
+  body; the client records e2e audio metrics from that body instead.
 
 Limitations:
 
@@ -539,9 +540,12 @@ Limitations:
   still decode PCM from `speech.audio.delta` base64 chunks, but the wire format
   is no longer `stream_format=audio`.
 - Audio TTFP is then the time to the first SSE `speech.audio.delta`, not the
-  first raw PCM byte.
-- If the server has no snapshot, the speech request still succeeds and the
-  Stage Benchmark Result section is omitted.
+  first raw PCM byte. For diffusion TTS the response is not SSE, so AUDIO_TTFP
+  is close to end-to-end latency.
+- If the server has no per-stage data, the speech request still succeeds.
+  Diffusion TTS does not print a Stage Benchmark Result section; after
+  Serving Benchmark Result the client prints
+  `Stage Benchmark Result of diffusion TTS omitted.`
 
 ```bash
 vllm bench serve --omni \
