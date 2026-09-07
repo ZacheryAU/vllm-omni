@@ -962,8 +962,7 @@ def _populate_response_metrics(
     stream_start: float,
 ) -> None:
     measurement_origin = {
-        "ttft": "response.created client receive to first non-empty text delta",
-        "ttfp": "response.created client receive to first audio packet",
+        "tpot": "Stage-0 engine mean time per output token",
         "rtf": "response.created client receive to last audio packet divided by emitted audio duration",
     }
     request_metrics: list[dict[str, object]] = []
@@ -996,10 +995,35 @@ def _populate_response_metrics(
     result.duplex_request_metrics = request_metrics
     from vllm_omni.clients.duplex import summarize_session_request_metrics
 
-    result.duplex_session_metrics = summarize_session_request_metrics(
+    session_metrics = summarize_session_request_metrics(
         request_metrics,
         session_id=result.session_id,
     )
+    global_metrics = collector.global_timing_summary(
+        after_s=stream_start,
+        window_started_at_s=stream_start,
+        response_ids=list(collector.response_ids),
+        measurement_origin={
+            "ttft": "input stream start to first non-empty text delta",
+            "ttfp": "input stream start to first audio packet",
+            "rtf": (
+                "input stream start-to-last-audio receive time divided by total emitted audio duration; "
+                "includes concurrent realtime input"
+            ),
+        },
+    )
+    if global_metrics:
+        session_metrics.update(
+            {
+                "global_ttft_ms": global_metrics.get("ttft_ms"),
+                "global_ttfp_ms": global_metrics.get("ttfp_ms"),
+                "global_rtf": _audio_rtf_from_raw_metric(global_metrics),
+                "global_audio_generation_ms": global_metrics.get("audio_generation_ms"),
+                "global_audio_duration_ms": global_metrics.get("audio_duration_ms"),
+                "global_measurement_origin": global_metrics.get("measurement_origin"),
+            }
+        )
+    result.duplex_session_metrics = session_metrics
 
 
 async def run_omniinteract_case(

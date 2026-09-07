@@ -808,7 +808,9 @@ class MultimodalOutputProcessor(VLLMOutputProcessor):
             itls_ms = record.setdefault("vllm_itls_ms", [])
             itls_ms.append(itl_ms)
             record["vllm_itl_ms"] = sum(itls_ms) / float(len(itls_ms))
-        record["vllm_tpot_ms"] = _mean_time_per_output_token_ms(native_stats)
+        record["vllm_tpot_ms"] = (
+            record["vllm_itl_ms"] if record["vllm_itls_ms"] else _mean_time_per_output_token_ms(native_stats)
+        )
 
     def _update_stats_from_finished(
         self,
@@ -836,6 +838,7 @@ class MultimodalOutputProcessor(VLLMOutputProcessor):
         finished_request = iteration_stats.finished_requests[-1]
         if finished_request.request_id != req_state.external_req_id:
             return
-        self._native_text_metric_record(req_state.external_req_id)["vllm_tpot_ms"] = (
-            float(finished_request.mean_time_per_output_token) * 1000.0
-        )
+        finished_tpot_ms = float(finished_request.mean_time_per_output_token) * 1000.0
+        record = self._native_text_metric_record(req_state.external_req_id)
+        if finished_tpot_ms > 0 and not record.get("vllm_itls_ms"):
+            record["vllm_tpot_ms"] = finished_tpot_ms
