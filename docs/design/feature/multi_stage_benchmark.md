@@ -33,11 +33,13 @@ The name of stages are fetched from `StagePipelineConfig.model_stage`, which are
 ## Core functions of stage benchmark
 
 ### `StagePool.build_stage_metrics()` — `vllm_omni/engine/stage_pool.py`
+
 This is centralized method where stage metrics are computed. It is called by the Orchestrator exactly once per stage per request, at the moment `output.finished = True` is received. The method takes the raw stage output and a `submit_ts` timestamp, and returns a `StageRequestStats` object that flows downstream to the aggregator and the HTTP response.
 
 If you want to check how the stage metrics are computed, it is recommended to add `logger.info()` inside this method.
 
 ### `print_stage_metrics()` — `vllm_omni/benchmarks/metrics/metrics.py`
+
 This is the benchmark-side print entry point for per-stage results. It is called once per stage at the end of a benchmark run, after `_build_stage_metrics_from_outputs()` has aggregated all per-request `stage_metrics` snapshots into a `StageBenchmarkMetrics` object. All latency values go through `_print_percentile_metric()`, like mean, median, p99 (and any other percentiles in `selected_percentiles`) from the raw sample list in `StageBenchmarkMetrics`.
 
 If you want to change the printing format of stage benchmark, you can edit this function.
@@ -45,50 +47,67 @@ If you want to change the printing format of stage benchmark, you can edit this 
 ## Stage Metrics design
 
 ### General design for stage local metrics
+
 - stage_gen_time: Time from submitting a request to a specific stage (which is collected as `OrchestratorRequestState.stage_submit_ts[stage_id]`) to that stage finishing generation (which is collected when `StagePool.build_stage_metrics()` is called), which is the basic latency metric for stages.
 - Generalized serving time to first output (TTFT) for streaming stages: Time from the __HTTP request being accepted by the serving frontend__ (to ignore the network latency which is measured by end-to-end benchmark, which is collected when `serve_http()` is called) to the stage producing its first __non-empty__ (to measure the time till users can get the result) output (which is collected as `StagePool._non_empty_first_output_timestamps_by_request`).
 - Generalized Time-per-output-token (TPOT) and Inter-token-latency (ITL) for more types of streaming stages besides text output stage. Qwen3.5-Omni begins to use generalized abbreviations like TPOP.
 
 ### Special design for different output type stages
+
 Stage local benchmark data can be varied for different output types. The output type of each stage should be fetched from model settings and avoid hardcode if possible. Here are some examples of customized metrics:
+
 - Text output stage (like Thinker in Qwen3-Omni): generated tokens
 - Audio output stage (like Code2wav in Qwen3-Omni): audio real-time factor
 - Image output stage (like DiT in BAGEL): image generation latency
 - Internal stream stage (like Talker in Qwen3-Omni): inter-chunk latency
 
-`print_stage_metrics()` first determines the stage modality from `final_output_type` and `output_unit_type`, then dispatches to the appropriate sub-printer.
+`print_stage_metrics()` first classifies the stage with `_stage_modality_flags(final_output_type, output_unit_type)`, then dispatches to the matching sub-printer (text / audio / image / internal stream). See [modality troubleshooting](#a-stage-appears-but-modality-specific-metrics-are-missing) for the exact selection rules.
 
 ## `vllm_omni/metrics/definitions.py` — the single source of truth
+
 This file is the central registry for all metric naming, constants, and shared formula helpers in vLLM-Omni. It is consumed by the server-side Prometheus pipeline, the benchmark client, and the stage metrics data path.
 
 ### What it contains
+
 - Metric name constants, string keys used as dict keys in `stage_metrics` snapshots, `StageRequestStats` field names, `StageBenchmarkMetrics` field names, and Prometheus metric family names.
 - Scalar defaults, like `DEFAULT_AUDIO_SAMPLE_RATE` as a fallback when a model does not populate `audio_sample_rate` in its output.
 - Formula helpers, shared computations and extractions used by both the server (`build_stage_metrics`) and the benchmark client to keep results consistent.
 
 ### Always check here first when handling metrics
+
 Before adding or renaming a metric anywhere in the codebase, search this file. The same string often already exists under a slightly different spelling. Using the wrong one silently produces a field mismatch or redundancy.
 
 If a new name or constant is needed, add it here first, then import it:
+
 ```python
 from vllm_omni.metrics import definitions as defs
 
 # use the constant, avoid hardcoding the string
 my_field = defs.MY_NEW_METRIC_MS
 ```
+
 The same applies to new formula helpers — adding them to `definitions.py` ensures the server and benchmark client stay in sync by sharing exactly the same implementation.
 
 ## Adding a New Stage Metric Field
+
+Propagation is __explicit__, not automatic: both the orchestrator merge path and the benchmark aggregator only handle fields they list.
+
 1. Add the field to `StageRequestStats` and its string key to `metrics/definitions.py`.
 2. Populate it in `StagePool.build_stage_metrics()`.
-3. The field propagates automatically through `_merge_stage_metric_event()` into the response dict.
-4. For benchmark aggregation: add the field to `_STAGE_BENCHMARK_FIELDS` and format it in the relevant `_print_*_stage_metrics()`.
+3. Wire it into `OrchestratorAggregator._merge_stage_metric_event()` (fixed field set when building/updating the response `stage_metrics` dict). Document the aggregation rule there (examples already in that function: sum, first positive wins, last non-empty wins, extend+mean for latency lists).
+4. Aggregate it in `_build_stage_metrics_from_outputs()` (read the snapshot key into per-stage sample lists / totals). Add a column to `_STAGE_BENCHMARK_FIELDS` when the printer needs a new storage field.
+5. Format it in the relevant `_print_*_stage_metrics()` (and gate on samples if the metric is optional).
+
+Skipping step 3 leaves the field out of the HTTP/`stage_metrics` payload. Skipping step 4 leaves it at defaults in `--print-stage` output even when the server computed it.
 
 ## General Troubleshooting
+
 ### No stage benchmark output at all
+
 `print_stage_metrics()` is only called when `--print-stage` is passed to the benchmark runner. Confirm the flag is present. Without it, the entire stage section is silently skipped, even if stage metrics data is available.
 
 ### Stage name shows as stage_0, stage_1 instead of a meaningful name
+
 The display name comes from `StagePipelineConfig.model_stage` in your model's pipeline definition. Check: `vllm_omni/model_executor/models/<YOUR_MODEL>/pipeline.py`.
 
 For example, the `dynin_omni` pipeline sets `model_stage="token2text"` for stage 0, `model_stage="token2image"` for stage 1, and so on. If `model_stage` is missing or empty, `_build_stage_metrics_from_outputs()` falls back to `f"stage_{stage_id}"`.
@@ -105,6 +124,7 @@ StagePipelineConfig(
 ```
 
 ### A stage is missing from the output entirely
+
 If a stage never appears in the printed table, check `StagePipelineConfig.final_output` in your pipeline definition.
 
 Any stage whose output needs to be returned to the client (text, audio, image) should have `final_output=True`. This also controls when the request is considered finished from the client's perspective — a request only terminates after all `final_output=True` stages complete. Setting `final_output=True` on intermediate stages unnecessarily will cause premature request termination, so only set it on stages that genuinely produce client-facing output.
@@ -123,16 +143,17 @@ StagePipelineConfig(
 That said, you don't need to set every stage's `final_output=True` just to get it into the printed table. `_build_stage_metrics_snapshot()` iterates over `stage_events`, which includes events from intermediate stages recorded via `StageMetricsMessage`. As long as an intermediate stage finishes before the downstream `final_output=True` stage completes — meaning its `StageMetricsMessage` has already been consumed and written into `stage_events` — its metrics will appear in the snapshot that gets embedded in the response and subsequently printed. This is probably relevant for stages that generate Chain-of-Thought text.
 
 ### A stage appears but modality-specific metrics are missing
-`print_stage_metrics()` dispatches to the correct sub-printer (`_print_audio_stage_metrics()`, `_print_image_stage_metrics()`, etc.) based on `StagePipelineConfig`.`final_output_type`. If the wrong sub-printer runs — or none does — check `final_output_type` in your pipeline definition:
 
-| Expected metrics | Correct `final_output_type` |
-| ---------------- | --------------------------- |
-| TTFT, TPOT, ITL | "text" |
-| TTFP, RTF, audio duration | "audio" |
-| Image generation time, pixel count | "image" |
-| TTFC, TPOC, inter-chunk latency | "internal_stream" |
+`print_stage_metrics()` classifies each stage with `_stage_modality_flags(final_output_type, output_unit_type)`, then dispatches to a sub-printer. The table is a modality classification; for text / audio / image, `final_output_type` usually matches. The __internal_stream__ bucket (TTFC / TPOP / ICL) is selected mainly from `output_unit_type`:
 
-A wrong or missing `final_output_type` causes `print_stage_metrics()` to print only the generic stage timing block with no modality-specific rows.
+| Category | Typical `final_output_type` | How the printer is selected |
+| --- | --- | --- |
+| Text (TTFT, TPOT, ITL, token counts) | `"text"` | `final_output_type == "text"` or `output_unit_type == "text"` |
+| Audio (TTFP, RTF, duration / frames) | `"audio"` | `final_output_type == "audio"` or `output_unit_type == "audio"` |
+| Image (generation time, pixels) | `"image"` | `final_output_type in {"image", "images"}` or `output_unit_type == "image"` |
+| Internal stream (TTFC, TPOP, ICL) | often unset (e.g. Talker) | `output_unit_type` in the streaming unit set (`text` / `stream` / `audio`) and the stage is not already text/audio — commonly `output_unit_type == "stream"` |
+
+If the wrong sub-printer runs (or only generic stage timing appears), check both fields on the stage snapshot. For missing internal-stream rows specifically, confirm `stage_metrics[<stage_id>].output_unit_type` and that timing samples exist (`serving_time_to_first_output_ms`, `time_per_output_unit_ms`, `inter_output_latencies_ms`).
 
 ```python
 # vllm_omni/model_executor/models/<YOUR_MODEL>/pipeline.py
@@ -140,7 +161,7 @@ StagePipelineConfig(
     stage_id=1,
     model_stage="tts",
     final_output=True,
-    final_output_type="audio",   # ← This will be used to determine the modal of this stage
+    final_output_type="audio",   # text / audio / image stages
     ...
 )
 ```
