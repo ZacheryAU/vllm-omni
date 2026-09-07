@@ -411,7 +411,7 @@ class VideoResponse(BaseModel):
         description="Filename of the saved output video files for this job.",
     )
     inference_time_s: float | None = Field(default=None, description="End-to-end inference time in seconds.")
-    fps: int | None = Field(default=None, description="Resolved output video frames per second, if known.")
+    fps: float | None = Field(default=None, description="Resolved output video frames per second, if known.")
     num_frames: int | None = Field(default=None, description="Resolved number of output video frames, if known.")
     duration_s: float | None = Field(default=None, description="Resolved output video duration in seconds, if known.")
     metrics: dict[str, Any] | None = Field(

@@ -1140,6 +1140,15 @@ def _video_frames_from_payload(data: Mapping[str, object], request_body: Mapping
     return 0
 
 
+def _is_structured_image_reference(reference: Mapping[str, object]) -> bool:
+    """True for API image_reference objects ({image_url}/{file_id})."""
+    image_url = reference.get("image_url")
+    file_id = reference.get("file_id")
+    has_url = isinstance(image_url, str) and bool(image_url)
+    has_file_id = isinstance(file_id, str) and bool(file_id)
+    return has_url or has_file_id
+
+
 def _add_video_reference_to_form(form: aiohttp.FormData, reference: object) -> bool:
     if isinstance(reference, dict) and "bytes" in reference:
         form.add_field(
@@ -1149,6 +1158,19 @@ def _add_video_reference_to_form(form: aiohttp.FormData, reference: object) -> b
             content_type=reference.get("content_type", "application/octet-stream"),
         )
         return True
+
+    if isinstance(reference, Mapping) and _is_structured_image_reference(reference):
+        form.add_field("image_reference", json.dumps(dict(reference)))
+        return True
+
+    if isinstance(reference, list):
+        if reference and all(isinstance(item, Mapping) and _is_structured_image_reference(item) for item in reference):
+            form.add_field("image_reference", json.dumps([dict(item) for item in reference]))
+            return True
+        raise ValueError(
+            "Unsupported image_reference list; expected non-empty list of "
+            '{"image_url": "..."} and/or {"file_id": "..."} objects.'
+        )
 
     if isinstance(reference, str):
         if reference.startswith(("data:image", "http://", "https://")):
@@ -1165,8 +1187,13 @@ def _add_video_reference_to_form(form: aiohttp.FormData, reference: object) -> b
                 content_type=_guess_mime_type(local_path),
             )
             return True
+        raise ValueError(f"Unsupported image_reference path or URL: {reference!r}")
 
-    return False
+    raise ValueError(
+        "Unsupported image_reference; expected upload bytes, local path/URL string, "
+        'or {"image_url": "..."} / {"file_id": "..."} object '
+        f"(got {type(reference).__name__})."
+    )
 
 
 def _add_video_extra_body_to_form(

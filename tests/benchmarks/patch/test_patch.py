@@ -1422,5 +1422,51 @@ def test_video_local_image_reference_not_forwarded_as_raw_extra_field(tmp_path, 
     assert uploaded == base64.b64decode(_MIN_PNG_B64)
 
 
+@pytest.mark.parametrize(
+    "reference",
+    [
+        {"image_url": "https://example.com/ref.png"},
+        {"file_id": "file-abc"},
+        [{"image_url": "https://example.com/a.png"}, {"file_id": "file-xyz"}],
+    ],
+)
+def test_video_structured_image_reference_serialized_to_form(reference: object, mocker: MockerFixture) -> None:
+    """Object-form image_reference must be JSON-serialized, not silently dropped."""
+    import aiohttp
+
+    captured: list[tuple[str, object]] = []
+    real_add_field = aiohttp.FormData.add_field
+
+    def tracking_add_field(self, name, value=None, **kwargs):
+        captured.append((str(name), value))
+        return real_add_field(self, name, value, **kwargs)
+
+    mocker.patch.object(aiohttp.FormData, "add_field", tracking_add_field)
+
+    form = aiohttp.FormData()
+    extra_body = {"image_reference": reference}
+    request_body = {"model": "vid", "prompt": "p", **extra_body}
+    _add_video_extra_body_to_form(form, extra_body, request_body)
+    assert _add_video_reference_to_form(form, reference) is True
+
+    field_names = [name for name, _ in captured]
+    # Reserved key must not be double-forwarded as a generic extra field;
+    # exactly one dedicated image_reference field.
+    assert field_names.count("image_reference") == 1
+    assert "input_reference" not in field_names
+    payload = next(value for name, value in captured if name == "image_reference")
+    assert json.loads(payload) == reference
+
+
+def test_video_unsupported_image_reference_raises() -> None:
+    import aiohttp
+
+    form = aiohttp.FormData()
+    with pytest.raises(ValueError, match="Unsupported image_reference"):
+        _add_video_reference_to_form(form, {"not_a_supported_key": "x"})
+    with pytest.raises(ValueError, match="Unsupported image_reference"):
+        _add_video_reference_to_form(form, "/tmp/does-not-exist-ref.png")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
