@@ -163,6 +163,24 @@ def extract_diffusion_denoise_ms(output: Any) -> float | None:
     return sum_diffusion_stage_durations_ms(output, ".diffuse")
 
 
+def coerce_bool(value: object, *, default: bool = False) -> bool:
+    """Coerce JSON / form / env-like values to bool.
+
+    Accepts ``bool``, numeric 0/1, and common truthy strings
+    (``\"1\"`` / ``\"true\"`` / ``\"yes\"`` / ``\"on\"``, case-insensitive).
+    ``None`` and unrecognized types return ``default``.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
 def coerce_positive_int_scalar(value: object) -> int | None:
     """Coerce a value to a positive int without importing tensor libs.
 

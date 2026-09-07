@@ -494,6 +494,8 @@ P99 IMAGE_GENERATION (ms):               2734.65
 
 Use the same pattern with `--endpoint /v1/images/edits` or `--endpoint /v1/videos` (and model-specific `--extra-body` as needed). Pure image/video runs omit the Text Result section when there is no generated text.
 
+`/v1/images/edits` defaults to **non-streaming JSON** (`stream=false`) so single-stage edit models are not rejected by the server. For multi-stage pipelines that need SSE (AR TTFT / image chunks), pass `"stream": true` in `--extra-body`.
+
 `/v1/videos` is an async job API: the client creates a job, then polls until `completed`/`failed`. Measured **e2el** therefore includes client poll sleep and any overshoot after the job actually finishes. Tune polling via `--extra-body`:
 
 - `poll_interval_s` (default `2.0`): sleep between status polls

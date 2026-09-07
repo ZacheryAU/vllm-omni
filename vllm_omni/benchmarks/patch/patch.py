@@ -86,7 +86,7 @@ from vllm_omni.benchmarks.omniinteract import (
     write_batch_artifacts as write_omniinteract_batch_artifacts,
 )
 from vllm_omni.metrics import definitions as defs
-from vllm_omni.metrics.utils import coerce_positive_float_scalar, coerce_positive_int_scalar
+from vllm_omni.metrics.utils import coerce_bool, coerce_positive_float_scalar, coerce_positive_int_scalar
 
 if TYPE_CHECKING:
     from vllm_omni.clients.duplex import DuplexClient
@@ -1191,6 +1191,9 @@ def _add_video_extra_body_to_form(
         "height",
         "poll_interval_s",
         "poll_timeout_s",
+        # Handled only by _add_video_reference_to_form (upload / JSON image_url).
+        "image_reference",
+        "input_reference",
         *_VIDEO_FORM_FIELDS,
     }
     for key, value in extra_body.items():
@@ -1570,6 +1573,32 @@ async def async_request_openai_chat_omni_completions(
     return output
 
 
+def _finalize_image_json_http_response(
+    output: MixRequestFuncOutput,
+    *,
+    start_time: float,
+    status: int,
+    data: Mapping[str, object] | None,
+    error_text: str | None,
+) -> None:
+    """Set e2el after the image JSON body has been fully read and validated."""
+    output.latency = time.perf_counter() - start_time
+    if status != 200:
+        output.error = f"HTTP {status}: {error_text or ''}"
+        output.success = False
+        return
+    if not isinstance(data, Mapping):
+        output.error = "HTTP 200 response did not contain a JSON object"
+        output.success = False
+        return
+    payload_image_count = _apply_image_metrics_from_payload(output, data)
+    if payload_image_count <= 0:
+        output.error = "HTTP 200 response did not contain a valid image payload"
+        output.success = False
+        return
+    output.success = True
+
+
 async def async_request_openai_image_generations_omni(
     request_func_input: RequestFuncInput,
     session: aiohttp.ClientSession,
@@ -1621,22 +1650,24 @@ async def async_request_openai_image_generations_omni(
     output.start_time = st
     try:
         async with session.post(url=api_url, json=payload, headers=headers) as response:
-            output.latency = time.perf_counter() - st
             if response.status == 200:
                 data = await response.json()
-                if not isinstance(data, Mapping):
-                    output.error = "HTTP 200 response did not contain a JSON object"
-                    output.success = False
-                else:
-                    payload_image_count = _apply_image_metrics_from_payload(output, data)
-                    if payload_image_count <= 0:
-                        output.error = "HTTP 200 response did not contain a valid image payload"
-                        output.success = False
-                    else:
-                        output.success = True
+                _finalize_image_json_http_response(
+                    output,
+                    start_time=st,
+                    status=response.status,
+                    data=data if isinstance(data, Mapping) else None,
+                    error_text=None,
+                )
             else:
-                output.error = f"HTTP {response.status}: {await response.text()}"
-                output.success = False
+                error_text = await response.text()
+                _finalize_image_json_http_response(
+                    output,
+                    start_time=st,
+                    status=response.status,
+                    data=None,
+                    error_text=error_text,
+                )
     except Exception:
         output.latency = time.perf_counter() - st
         output.success = False
@@ -1767,11 +1798,18 @@ async def async_request_openai_image_edits_omni(
     session: aiohttp.ClientSession,
     pbar: tqdm | None = None,
 ) -> MixRequestFuncOutput:
-    """Streaming request to /v1/images/edits for multi-stage image-edit benchmarks."""
+    """Multipart request to /v1/images/edits.
+
+    Defaults to non-streaming JSON so single-stage edit models work. The server
+    rejects ``stream=true`` when ``len(stage_configs) <= 1``. Pass
+    ``stream: true`` in ``--extra-body`` for multi-stage SSE (AR TTFT / image
+    chunks).
+    """
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "OpenAI Image Edits API", "images/edits")
 
     extra_body = dict(request_func_input.extra_body or {})
+    want_stream = coerce_bool(extra_body.pop("stream", None), default=False)
     model = request_func_input.model_name if request_func_input.model_name else request_func_input.model
     output = MixRequestFuncOutput()
     output.prompt_len = request_func_input.prompt_len
@@ -1788,7 +1826,7 @@ async def async_request_openai_image_edits_omni(
     form.add_field("prompt", request_func_input.prompt)
     form.add_field("response_format", "b64_json")
     form.add_field("output_format", str(extra_body.get("output_format", "png")))
-    form.add_field("stream", "true")
+    form.add_field("stream", "true" if want_stream else "false")
 
     size = extra_body.get("size")
     if size is None:
@@ -1821,12 +1859,21 @@ async def async_request_openai_image_edits_omni(
 
     st = time.perf_counter()
     output.start_time = st
-    timestamp = st
-    most_recent_text_timestamp = st
-    generated_text = ""
     try:
         async with session.post(url=api_url, data=form, headers=headers) as response:
-            if response.status == 200:
+            if response.status != 200:
+                error_text = await response.text()
+                _finalize_image_json_http_response(
+                    output,
+                    start_time=st,
+                    status=response.status,
+                    data=None,
+                    error_text=error_text,
+                )
+            elif want_stream:
+                timestamp = st
+                most_recent_text_timestamp = st
+                generated_text = ""
                 handler = StreamedResponseHandler()
                 async for chunk_bytes in response.content.iter_any():
                     if not chunk_bytes:
@@ -1883,9 +1930,16 @@ async def async_request_openai_image_edits_omni(
                 output.generated_text = generated_text
                 output.success = True
             else:
-                output.error = f"HTTP {response.status}: {await response.text()}"
-                output.success = False
+                data = await response.json()
+                _finalize_image_json_http_response(
+                    output,
+                    start_time=st,
+                    status=response.status,
+                    data=data if isinstance(data, Mapping) else None,
+                    error_text=None,
+                )
     except Exception:
+        output.latency = time.perf_counter() - st
         output.success = False
         output.error = traceback.format_exc()
         logger.error(f"ERROR: send image edit request failed, reason is: {output.error}")
