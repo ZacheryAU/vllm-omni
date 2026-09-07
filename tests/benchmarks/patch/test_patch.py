@@ -1268,6 +1268,48 @@ async def test_speech_print_stage_still_parses_sse_metrics(mocker: MockerFixture
     assert output.audio_body_without_stage_metrics is False
 
 
+def _speech_sse_session(mocker: MockerFixture, chunks: list[bytes]):
+    mock_response = MockResponse(200, chunks, headers={"Content-Type": "text/event-stream"})
+    mock_session = mocker.AsyncMock()
+    mock_session.post = mocker.MagicMock(return_value=mock_response)
+    return mock_session
+
+
+@pytest.mark.asyncio
+async def test_speech_sse_empty_body_is_not_success(mocker: MockerFixture):
+    """HTTP 200 with an empty SSE body must not count as a successful request."""
+    output = await async_request_openai_audio_speech(
+        _speech_stage_metrics_request(),
+        _speech_sse_session(mocker, []),
+    )
+
+    assert output.success is False
+    assert "speech.audio.done" in output.error
+
+
+@pytest.mark.asyncio
+async def test_speech_sse_delta_without_done_is_not_success(mocker: MockerFixture):
+    """Partial audio then EOF without speech.audio.done is a failed request."""
+    pcm = b"\x00\x00" * 2400
+    chunks = [
+        create_sse_chunk(
+            {
+                "type": "speech.audio.delta",
+                "audio": base64.b64encode(pcm).decode("ascii"),
+                "sample_rate": 24000,
+            }
+        )
+    ]
+    output = await async_request_openai_audio_speech(
+        _speech_stage_metrics_request(),
+        _speech_sse_session(mocker, chunks),
+    )
+
+    assert output.success is False
+    assert "speech.audio.done" in output.error
+    assert output.audio_frames == 2400
+
+
 def test_should_print_diffusion_stage_omitted_only_for_audio_body_fallback():
     omitted = MixRequestFuncOutput()
     omitted.audio_body_without_stage_metrics = True

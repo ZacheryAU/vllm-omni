@@ -1530,6 +1530,7 @@ async def async_request_openai_audio_speech(
                 # returns a single audio/* body. Parse that as raw PCM instead of
                 # json.loads on binary.
                 parse_as_sse = requested_sse and not _content_type_is_audio(content_type)
+                saw_speech_audio_done = False
                 if parse_as_sse:
                     handler = StreamedResponseHandler()
                     async for chunk_bytes in response.content.iter_any():
@@ -1555,6 +1556,8 @@ async def async_request_openai_audio_speech(
                                     data,
                                     update_output_tokens=False,
                                 )
+                            elif chunk_type == "speech.audio.done":
+                                saw_speech_audio_done = True
                             elif chunk_type == "speech.audio.error":
                                 error = data.get("error")
                                 message = error.get("message") if isinstance(error, dict) else error
@@ -1618,7 +1621,11 @@ async def async_request_openai_audio_speech(
                         ct,
                         api_url,
                     )
-                output.success = True
+                if parse_as_sse and not saw_speech_audio_done:
+                    output.error = "SSE stream ended without speech.audio.done"
+                    output.success = False
+                else:
+                    output.success = True
             else:
                 output.error = response.reason or ""
                 output.success = False
