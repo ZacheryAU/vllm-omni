@@ -28,11 +28,11 @@ from vllm_omni.benchmarks.patch.patch import (
     _apply_stage0_token_timings,
     _apply_video_metrics_from_payload,
     _attach_seed_tts_to_request_func_input,
+    _build_benchmark_session,
+    _omni_request_timeout_s,
     _print_diffusion_stage_omitted,
     _should_print_diffusion_stage_omitted,
     async_request_openai_audio_speech,
-    _build_benchmark_session,
-    _omni_request_timeout_s,
     async_request_openai_chat_omni_completions,
     async_request_openai_image_edits_omni,
     async_request_openai_image_generations_omni,
@@ -1332,6 +1332,8 @@ def test_should_print_diffusion_stage_omitted_only_for_audio_body_fallback():
 def test_print_diffusion_stage_omitted_after_serving_report(capsys):
     _print_diffusion_stage_omitted()
     assert DIFFUSION_TTS_STAGE_OMITTED_MSG in capsys.readouterr().out
+
+
 class TestOmniRequestTimeout:
     """``--omni-request-timeout-s`` precedence: explicit value > 900 s default."""
 
