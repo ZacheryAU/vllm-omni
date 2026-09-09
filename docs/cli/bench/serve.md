@@ -330,10 +330,23 @@ Accuracy evaluation is opt-in and requires an already-running text judge with an
 benchmark does not launch or stop the judge server. Add the following options to the command above:
 
 ```bash
-  --omniinteract-evaluate \
-  --omniinteract-judge-base-url http://127.0.0.1:8000 \
-  --omniinteract-judge-model /path/to/judge-model
+vllm serve Qwen/Qwen2.5-7B-Instruct \
+  --served-model-name Qwen2.5-7B-Instruct \
+  --port 8001
 ```
+
+Then add to the benchmark command:
+
+```bash
+  --omniinteract-evaluate \
+  --omniinteract-judge-base-url http://127.0.0.1:8001 \
+  --omniinteract-judge-model Qwen2.5-7B-Instruct
+```
+
+`--omniinteract-judge-model` must match that judge process's `--served-model-name` (or its `--model`
+string if `--served-model-name` is omitted). It is not a checkpoint path to load, and it is not the
+Omni DUT `--served-model-name`. Point `--omniinteract-judge-base-url` at the judge, not at the Omni
+realtime endpoint.
 
 The early / core / interrupted-partial judge prompts follow the official English
 templates in [Lucky-Lance/OmniInteract](https://github.com/Lucky-Lance/OmniInteract)
