@@ -11,16 +11,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from vllm_omni.benchmarks.duplex_session_metrics import (
-    DUPLEX_METRICS_FILENAME,
-    build_duplex_metrics_report,
-    collect_duplex_session_metrics,
-)
 
 from vllm_omni.benchmarks.duplex import omni_duplex_eval_runner as runner
 from vllm_omni.benchmarks.duplex.omni_duplex_eval_dataset import DuplexSample
 from vllm_omni.benchmarks.duplex.omni_duplex_eval_judge import DuplexJudge
 from vllm_omni.benchmarks.duplex.omni_duplex_eval_runner import GenerateSampleResult
+from vllm_omni.benchmarks.duplex_session_metrics import (
+    DUPLEX_METRICS_FILENAME,
+    build_duplex_metrics_report,
+    collect_duplex_session_metrics,
+)
 from vllm_omni.clients.duplex import EventCollector
 from vllm_omni.entrypoints.cli.benchmark import omni_duplex_eval as cli
 from vllm_omni.entrypoints.cli.benchmark.omni_duplex_eval import OmniDuplexEvalSubcommand
