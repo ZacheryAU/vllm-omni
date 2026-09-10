@@ -946,13 +946,9 @@ class _RealtimeSession:
 
 def _audio_rtf_from_raw_metric(raw_metric: dict[str, object]) -> float | None:
     """Derive the audio RTF from a client-reported raw request metric."""
-    from vllm_omni.metrics.definitions import compute_audio_rtf
+    from vllm_omni.benchmarks.duplex_session_metrics import audio_rtf_from_raw_metric
 
-    generation_ms = raw_metric.get("audio_generation_ms")
-    duration_ms = raw_metric.get("audio_duration_ms")
-    if not isinstance(generation_ms, int | float) or not isinstance(duration_ms, int | float) or duration_ms <= 0:
-        return None
-    return round(compute_audio_rtf(float(generation_ms) / 1000.0, float(duration_ms) / 1000.0), 6)
+    return audio_rtf_from_raw_metric(raw_metric)
 
 
 def _populate_response_metrics(
@@ -961,69 +957,16 @@ def _populate_response_metrics(
     *,
     stream_start: float,
 ) -> None:
-    measurement_origin = {
-        "tpot": "Stage-0 engine mean time per output token",
-        "rtf": "response.created client receive to last audio packet divided by emitted audio duration",
-    }
-    request_metrics: list[dict[str, object]] = []
-    output_tokens = 0
-    for request_index, response_id in enumerate(collector.response_ids):
-        timing = collector.timing_summary(
-            after_s=stream_start,
-            input_committed_at_s=None,
-            response_id=response_id,
-            measurement_origin=measurement_origin,
-        )
-        raw_metric = timing.get("request_metrics")
-        stage0 = timing.get("stage0_tokens")
-        metric = {
-            "session_id": result.session_id,
-            "request_index": request_index,
-            "response_id": response_id,
-            **(raw_metric if isinstance(raw_metric, dict) else {}),
-        }
-        if isinstance(raw_metric, dict):
-            # The client reports raw data only; the RTF is derived here with
-            # the canonical server-side metric definition.
-            metric["rtf"] = _audio_rtf_from_raw_metric(raw_metric)
-        if isinstance(stage0, dict):
-            metric["stage0_tokens"] = dict(stage0)
-            output_tokens += int(stage0.get("output_token_count") or 0)
-        if isinstance(raw_metric, dict) or isinstance(stage0, dict):
-            request_metrics.append(metric)
-    result.output_tokens = output_tokens
-    result.duplex_request_metrics = request_metrics
-    from vllm_omni.clients.duplex import summarize_session_request_metrics
+    from vllm_omni.benchmarks.duplex_session_metrics import collect_duplex_session_metrics
 
-    session_metrics = summarize_session_request_metrics(
-        request_metrics,
+    bundle = collect_duplex_session_metrics(
+        collector,
+        stream_start=stream_start,
         session_id=result.session_id,
     )
-    global_metrics = collector.global_timing_summary(
-        after_s=stream_start,
-        window_started_at_s=stream_start,
-        response_ids=list(collector.response_ids),
-        measurement_origin={
-            "ttft": "input stream start to first non-empty text delta",
-            "ttfp": "input stream start to first audio packet",
-            "rtf": (
-                "input stream start-to-last-audio receive time divided by total emitted audio duration; "
-                "includes concurrent realtime input"
-            ),
-        },
-    )
-    if global_metrics:
-        session_metrics.update(
-            {
-                "global_ttft_ms": global_metrics.get("ttft_ms"),
-                "global_ttfp_ms": global_metrics.get("ttfp_ms"),
-                "global_rtf": _audio_rtf_from_raw_metric(global_metrics),
-                "global_audio_generation_ms": global_metrics.get("audio_generation_ms"),
-                "global_audio_duration_ms": global_metrics.get("audio_duration_ms"),
-                "global_measurement_origin": global_metrics.get("measurement_origin"),
-            }
-        )
-    result.duplex_session_metrics = session_metrics
+    result.output_tokens = bundle.output_tokens
+    result.duplex_request_metrics = bundle.request_metrics
+    result.duplex_session_metrics = bundle.session_metrics
 
 
 async def run_omniinteract_case(
