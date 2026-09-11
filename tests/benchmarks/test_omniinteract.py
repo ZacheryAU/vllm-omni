@@ -293,6 +293,71 @@ def test_scenario_cover_and_focus_sampling(tmp_path: Path) -> None:
     assert {case.scene_type for case in focused} == {"nested", "1qna"}
 
 
+def _write_overlapping_cover_dataset(root: Path) -> Path:
+    data_root = root / "data"
+    one_q1a = data_root / "1q1a"
+    (one_q1a / "videos").mkdir(parents=True)
+    (one_q1a / "annotations").mkdir()
+    entries = []
+    specs = [
+        (
+            "pair_a",
+            [
+                {
+                    "question_time": 0.0,
+                    "answer_time": 1.0,
+                    "question_type": "realtime",
+                    "is_interrupted": True,
+                }
+            ],
+        ),
+        (
+            "pair_b",
+            [
+                {
+                    "question_time": 0.0,
+                    "answer_time": 1.0,
+                    "question_type": "realtime",
+                    "is_interrupted": True,
+                }
+            ],
+        ),
+        (
+            "proactive_only",
+            [{"question_time": 0.0, "answer_time": 1.0, "question_type": "proactive"}],
+        ),
+    ]
+    for name, annotation in specs:
+        video = one_q1a / "videos" / f"{name}.mp4"
+        ann = one_q1a / "annotations" / f"{name}.json"
+        video.touch()
+        ann.write_text(json.dumps(annotation))
+        entries.append(
+            {
+                "video": f"videos/{name}.mp4",
+                "annotation": f"annotations/{name}.json",
+                "scene_type": "multi_turn",
+            }
+        )
+    (one_q1a / "video_json_map.json").write_text(json.dumps({"entries": entries}))
+    return data_root
+
+
+def test_cover_sampling_skips_tags_already_covered(tmp_path: Path) -> None:
+    root = _write_overlapping_cover_dataset(tmp_path)
+    selected = data.discover_omniinteract_cases(
+        root,
+        ("1q1a",),
+        num_prompts=2,
+        disable_shuffle=True,
+        scenario_tags=("realtime", "interrupted", "proactive"),
+    )
+    names = [case.video_path.stem for case in selected]
+    assert names == ["pair_a", "proactive_only"]
+    selected_tags = set().union(*(data.case_scenario_tags(case) for case in selected))
+    assert {"realtime", "interrupted", "proactive"} <= selected_tags
+
+
 def _archive(path: Path, member: str) -> None:
     with tarfile.open(path, "w") as archive:
         content = b"{}"

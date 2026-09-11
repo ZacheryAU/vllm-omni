@@ -426,12 +426,17 @@ def _select_with_scenario_tags(
 
     selected: list[OmniInteractCase] = []
     selected_paths: set[Path] = set()
+    covered_tags: set[str] = set()
+    requested = set(tags)
     for tag in tags:
+        if tag in covered_tags:
+            continue
         for case in buckets[tag]:
             if case.video_path in selected_paths:
                 continue
             selected.append(case)
             selected_paths.add(case.video_path)
+            covered_tags.update(tag_sets[case.video_path] & requested)
             break
 
     remaining = [case for case in cases if case.video_path not in selected_paths]

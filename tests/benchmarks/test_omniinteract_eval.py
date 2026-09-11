@@ -4,18 +4,24 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 
-from vllm_omni.benchmarks.data_modules.omniinteract_dataset import OmniInteractCase
+from vllm_omni.benchmarks.data_modules.omniinteract_dataset import (
+    OmniInteractCase,
+    OmniInteractEvaluationOptions,
+)
 from vllm_omni.benchmarks.omniinteract import OmniInteractCaseResult
 from vllm_omni.benchmarks.omniinteract_eval import (
     AlignedWord,
     TranscriptChunk,
     _summarize,
     build_slots,
+    evaluate_batch,
     evaluate_case,
+    evaluation_inputs_fingerprint,
     match_slots,
 )
 from vllm_omni.benchmarks.omniinteract_judge import (
@@ -177,6 +183,141 @@ def test_evaluate_case_persists_accuracy_artifact(tmp_path: Path) -> None:
     assert paper["all_global"]["IA_QTF1"] == pytest.approx(1.0)
     assert paper["realtime"]["IA_QTF1"] == pytest.approx(1.0)
     assert json.loads(artifact.read_text())["status"] == "ok"
+    fingerprint = evaluation["inputs_fingerprint"]
+    assert fingerprint["annotation_sha256"]
+    assert fingerprint["transcript_sha256"]
+    assert fingerprint["protocol_source"]
+
+
+def _realtime_eval_case(tmp_path: Path, *, transcript_text: str) -> tuple[OmniInteractCase, OmniInteractCaseResult]:
+    annotation = tmp_path / "annotation.json"
+    annotation.write_text(
+        json.dumps(
+            [
+                {
+                    "question_time": 0.0,
+                    "answer_time": 1.0,
+                    "question_text": "question",
+                    "answer_text": "answer",
+                    "question_type": "realtime",
+                }
+            ]
+        )
+    )
+    output_dir = tmp_path / "case-output"
+    output_dir.mkdir(exist_ok=True)
+    chunks: list[dict[str, object]] = []
+    if transcript_text:
+        chunks.append({"timestamp": [1.0, 1.5], "text": transcript_text})
+    (output_dir / "wav_transcript.json").write_text(json.dumps({"chunks": chunks}))
+    video = tmp_path / "video.mp4"
+    video.touch()
+    case = OmniInteractCase("1q1a", "video.mp4", video, annotation, "multi_turn")
+    result = OmniInteractCaseResult(
+        subset="1q1a",
+        video=str(video),
+        output_dir=str(output_dir),
+        success=True,
+        eligible_for_official_eval=True,
+    )
+    return case, result
+
+
+def _eval_options(tmp_path: Path, *, skip_existing: bool) -> OmniInteractEvaluationOptions:
+    return OmniInteractEvaluationOptions(
+        judge_base_url="http://127.0.0.1:9",
+        judge_model="cached-judge",
+        judge_api_key="EMPTY",
+        judge_timeout_s=60.0,
+        judge_max_tokens=32,
+        workers=1,
+        output_dir=tmp_path / "evaluation",
+        skip_existing=skip_existing,
+    )
+
+
+class _ConfiguredFixedJudge(_FixedJudge):
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        *,
+        api_key: str = "EMPTY",
+        timeout_s: float = 60.0,
+        max_tokens: int = 512,
+    ) -> None:
+        del api_key, timeout_s
+        self.base_url = base_url
+        self.model = model
+        self.max_tokens = max_tokens
+
+
+def test_skip_existing_reuses_matching_fingerprint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import vllm_omni.benchmarks.omniinteract_eval as eval_mod
+
+    case, result = _realtime_eval_case(tmp_path, transcript_text="answer")
+    options = _eval_options(tmp_path, skip_existing=False)
+    monkeypatch.setattr(eval_mod, "OmniInteractJudge", _ConfiguredFixedJudge)
+    first = evaluate_batch([case], [result], options)
+    assert first["summary"]["IA_QTF1"] == pytest.approx(1.0)
+
+    calls: list[str] = []
+
+    def _forbidden(
+        case: OmniInteractCase,
+        result: OmniInteractCaseResult,
+        judge: object,
+        output_path: Path,
+        config: object = None,
+        inputs_fingerprint: object = None,
+    ) -> dict[str, object]:
+        del case, result, judge, output_path, config, inputs_fingerprint
+        calls.append("evaluate_case")
+        raise AssertionError("matching fingerprint must reuse the cached evaluation")
+
+    monkeypatch.setattr(eval_mod, "evaluate_case", _forbidden)
+    reused = evaluate_batch([case], [result], _eval_options(tmp_path, skip_existing=True))
+    assert calls == []
+    assert reused["summary"]["IA_QTF1"] == pytest.approx(1.0)
+
+
+def test_skip_existing_rejects_stale_transcript(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import vllm_omni.benchmarks.omniinteract_eval as eval_mod
+
+    case, result = _realtime_eval_case(tmp_path, transcript_text="answer")
+    options = _eval_options(tmp_path, skip_existing=True)
+    fingerprint = evaluation_inputs_fingerprint(
+        annotation_path=case.annotation_path,
+        transcript_path=Path(result.output_dir) / "wav_transcript.json",
+        judge_model=options.judge_model,
+        judge_base_url=options.judge_base_url,
+        judge_max_tokens=options.judge_max_tokens,
+    )
+    sample_id = f"{case.subset}__{Path(result.output_dir).name}"
+    cache_path = options.output_dir / f"{sample_id}.unified_eval.json"
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "sample_id": sample_id,
+                "inputs_fingerprint": asdict(fingerprint),
+                "summary": {
+                    "IA_QTF1": 1.0,
+                    "num_slots": 1,
+                    "num_unmatched_chunks": 0,
+                    "Global_TP": 1,
+                    "Global_FP": 0,
+                    "Global_FN": 0,
+                },
+                "slots": [],
+            }
+        )
+    )
+    (Path(result.output_dir) / "wav_transcript.json").write_text(json.dumps({"chunks": []}))
+    monkeypatch.setattr(eval_mod, "OmniInteractJudge", _ConfiguredFixedJudge)
+    fresh = evaluate_batch([case], [result], options)
+    assert fresh["summary"]["IA_QTF1"] == pytest.approx(0.0)
 
 
 def _slot_row(
