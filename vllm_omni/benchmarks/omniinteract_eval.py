@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections import defaultdict
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -29,6 +31,8 @@ from vllm_omni.benchmarks.omniinteract_judge import (
 HARD = "Hard"
 SOFT = "Soft"
 PROTOCOL_SOURCE = "Lucky-Lance/OmniInteract@de304cef35fd9a50a5caadb5090c34cfbf0dd868"
+_HASH_CHUNK_BYTES = 65536
+_TRANSCRIPT_NAME = "wav_transcript.json"
 
 
 @dataclass(frozen=True)
@@ -142,6 +146,83 @@ class Judge(Protocol):
         slot: dict[str, object],
         actual_text: str,
     ) -> PartialJudgment: ...
+
+
+@dataclass(frozen=True)
+class EvaluationInputsFingerprint:
+    """Hashes and judge identity used to decide whether a cached eval is reusable."""
+
+    annotation_sha256: str
+    transcript_sha256: str
+    judge_model: str
+    judge_base_url: str
+    judge_max_tokens: int
+    protocol_source: str
+
+    @classmethod
+    def from_mapping(cls, payload: object) -> EvaluationInputsFingerprint | None:
+        if not isinstance(payload, Mapping):
+            return None
+        try:
+            return cls(
+                annotation_sha256=str(payload["annotation_sha256"]),
+                transcript_sha256=str(payload["transcript_sha256"]),
+                judge_model=str(payload["judge_model"]),
+                judge_base_url=_canonical_judge_base_url(str(payload["judge_base_url"])),
+                judge_max_tokens=int(payload["judge_max_tokens"]),
+                protocol_source=str(payload["protocol_source"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+
+def _canonical_judge_base_url(base_url: str) -> str:
+    return base_url.strip().rstrip("/")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(_HASH_CHUNK_BYTES)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def evaluation_inputs_fingerprint(
+    *,
+    annotation_path: Path,
+    transcript_path: Path,
+    judge_model: str,
+    judge_base_url: str,
+    judge_max_tokens: int,
+) -> EvaluationInputsFingerprint:
+    """Fingerprint transcript, annotation, and judge configuration for cache reuse."""
+
+    return EvaluationInputsFingerprint(
+        annotation_sha256=_sha256_file(annotation_path),
+        transcript_sha256=_sha256_file(transcript_path),
+        judge_model=judge_model,
+        judge_base_url=_canonical_judge_base_url(judge_base_url),
+        judge_max_tokens=judge_max_tokens,
+        protocol_source=PROTOCOL_SOURCE,
+    )
+
+
+def _fingerprint_from_options(
+    case: OmniInteractCase,
+    result: OmniInteractCaseResult,
+    options: OmniInteractEvaluationOptions,
+) -> EvaluationInputsFingerprint:
+    return evaluation_inputs_fingerprint(
+        annotation_path=case.annotation_path,
+        transcript_path=Path(result.output_dir) / _TRANSCRIPT_NAME,
+        judge_model=options.judge_model,
+        judge_base_url=options.judge_base_url,
+        judge_max_tokens=options.judge_max_tokens,
+    )
 
 
 @dataclass(frozen=True)
@@ -1024,13 +1105,14 @@ def evaluate_case(
     judge: Judge,
     output_path: Path,
     config: EvaluationConfig = EvaluationConfig(),
+    inputs_fingerprint: EvaluationInputsFingerprint | None = None,
 ) -> dict[str, object]:
     """Evaluate one published OmniInteract case."""
 
     annotation = _read_json(case.annotation_path)
     scene_type = "1QnA" if case.scene_type == "1qna" else case.scene_type
     slots = build_slots(annotation, scene_type, config.last_slot_tail_s)
-    transcript_path = Path(result.output_dir) / "wav_transcript.json"
+    transcript_path = Path(result.output_dir) / _TRANSCRIPT_NAME
     chunks, fully_aligned = load_transcript(transcript_path)
     matched, unmatched = match_slots(slots, chunks)
     sample_id = f"{case.subset}__{Path(result.output_dir).name}"
@@ -1039,6 +1121,13 @@ def evaluate_case(
         scored = _score_slot(row, slots, index, judge, config)
         scored["sample_id"] = sample_id
         slot_rows.append(scored)
+    fingerprint = inputs_fingerprint or evaluation_inputs_fingerprint(
+        annotation_path=case.annotation_path,
+        transcript_path=transcript_path,
+        judge_model=str(getattr(judge, "model", "") or ""),
+        judge_base_url=str(getattr(judge, "base_url", "") or ""),
+        judge_max_tokens=int(getattr(judge, "max_tokens", 0) or 0),
+    )
     evaluation = {
         "status": "ok",
         "sample_id": sample_id,
@@ -1048,6 +1137,7 @@ def evaluate_case(
         "model_json": str(transcript_path.resolve()),
         "timing_precision": "word-aligned" if fully_aligned else "chunk-level-approximate",
         "protocol_source": PROTOCOL_SOURCE,
+        "inputs_fingerprint": asdict(fingerprint),
         "summary": _summarize(slot_rows, len(unmatched) if config.count_unmatched_as_fp else 0),
         "slots": slot_rows,
         "unmatched_chunks": [asdict(chunk) for chunk in unmatched],
@@ -1193,7 +1283,7 @@ def evaluate_batch(
         max_tokens=options.judge_max_tokens,
     )
     item_rows: list[dict[str, object]] = []
-    work = []
+    work: list[tuple[OmniInteractCase, OmniInteractCaseResult, Path, EvaluationInputsFingerprint | None]] = []
     skipped = 0
     for case, result in zip(cases, results, strict=True):
         if not result.success or not result.eligible_for_official_eval:
@@ -1201,18 +1291,31 @@ def evaluate_batch(
             continue
         sample_id = f"{case.subset}__{Path(result.output_dir).name}"
         destination = output_root / f"{sample_id}.unified_eval.json"
-        if options.skip_existing and destination.is_file():
+        expected: EvaluationInputsFingerprint | None
+        try:
+            expected = _fingerprint_from_options(case, result, options)
+        except OSError:
+            expected = None
+        if expected is not None and options.skip_existing and destination.is_file():
             existing = _mapping(_read_json(destination))
-            if existing.get("status") == "ok":
+            cached = EvaluationInputsFingerprint.from_mapping(existing.get("inputs_fingerprint"))
+            if existing.get("status") == "ok" and cached == expected:
                 item_rows.append(existing)
                 continue
-        work.append((case, result, destination))
+        work.append((case, result, destination, expected))
 
     failures: list[dict[str, object]] = []
     with ThreadPoolExecutor(max_workers=options.workers) as executor:
         futures = {
-            executor.submit(evaluate_case, case, result, judge, destination): (case, destination)
-            for case, result, destination in work
+            executor.submit(
+                evaluate_case,
+                case,
+                result,
+                judge,
+                destination,
+                inputs_fingerprint=fingerprint,
+            ): (case, destination)
+            for case, result, destination, fingerprint in work
         }
         for future in as_completed(futures):
             case, destination = futures[future]
