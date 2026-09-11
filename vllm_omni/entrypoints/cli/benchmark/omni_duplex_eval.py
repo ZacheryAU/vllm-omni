@@ -4,8 +4,9 @@
 """CLI for Omni-DuplexEval generate / evaluate / summarize.
 
 ``generate`` still writes per-sample timed sentences and ``*.meta.json``.
-Duplex performance metrics for the run are written once to
-``<response-root>/duplex_metrics.json``.
+Duplex performance metrics are written to ``<response-root>/duplex_metrics.json``.
+Skipped samples keep previously recorded rows; incoming ``(split, sample_id)``
+rows replace the matching ones, then ``mean_duplex_global_*`` is recomputed.
 """
 
 import argparse
@@ -18,7 +19,11 @@ from vllm_omni.benchmarks.duplex.omni_duplex_eval_dataset import DEFAULT_DATASET
 from vllm_omni.benchmarks.duplex.omni_duplex_eval_eval import evaluate_sample, summarize_scores
 from vllm_omni.benchmarks.duplex.omni_duplex_eval_judge import DuplexJudge
 from vllm_omni.benchmarks.duplex.omni_duplex_eval_runner import GenerateSampleResult, generate_sample
-from vllm_omni.benchmarks.duplex_session_metrics import DUPLEX_METRICS_FILENAME, build_duplex_metrics_report
+from vllm_omni.benchmarks.duplex_session_metrics import (
+    DUPLEX_METRICS_FILENAME,
+    merge_duplex_metrics_report,
+    read_duplex_metrics_report,
+)
 from vllm_omni.entrypoints.cli.benchmark.base import OmniBenchmarkSubcommandBase
 
 
@@ -69,7 +74,8 @@ def _write_duplex_metrics(response_root: str | Path, results: list[GenerateSampl
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
-            build_duplex_metrics_report(
+            merge_duplex_metrics_report(
+                read_duplex_metrics_report(path),
                 request_metrics=request_metrics,
                 session_metrics=session_metrics,
             ),

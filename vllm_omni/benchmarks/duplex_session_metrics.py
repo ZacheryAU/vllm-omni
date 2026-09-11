@@ -11,9 +11,11 @@ per-session ``global_*`` values into a run-level report.
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vllm_omni.metrics.definitions import compute_audio_rtf
@@ -154,3 +156,71 @@ def build_duplex_metrics_report(
     }
     report.update(mean_duplex_global_metrics(session_metrics))
     return report
+
+
+def sample_metric_key(metric: Mapping[str, object]) -> tuple[str, str] | None:
+    """Identity used to merge resume rows: ``(split, sample_id)``."""
+    split = metric.get("split")
+    sample_id = metric.get("sample_id")
+    if isinstance(split, str) and split and isinstance(sample_id, str) and sample_id:
+        return (split, sample_id)
+    return None
+
+
+def merge_metric_rows(
+    existing: Sequence[Mapping[str, object]],
+    incoming: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Replace existing rows that share an incoming ``(split, sample_id)``.
+
+    Incoming rows without a key are appended. Existing rows without a key are
+    kept because they cannot be matched.
+    """
+    incoming_keys = {key for metric in incoming if (key := sample_metric_key(metric)) is not None}
+    merged = [dict(metric) for metric in existing if (key := sample_metric_key(metric)) not in incoming_keys]
+    merged.extend(dict(metric) for metric in incoming)
+    return merged
+
+
+def read_duplex_metrics_report(path: Path) -> dict[str, object] | None:
+    """Load an on-disk report. Missing files return ``None``; corrupt JSON raises."""
+    if not path.is_file():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+    return payload
+
+
+def _metric_rows(value: object, *, field_name: str) -> list[Mapping[str, object]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a JSON list")
+    rows: list[Mapping[str, object]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError(f"{field_name} entries must be JSON objects")
+        rows.append(item)
+    return rows
+
+
+def merge_duplex_metrics_report(
+    existing: Mapping[str, object] | None,
+    *,
+    request_metrics: Sequence[Mapping[str, object]],
+    session_metrics: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """Merge this run into a previous ``duplex_metrics.json`` payload."""
+    previous_requests = _metric_rows(
+        None if existing is None else existing.get("duplex_request_metrics"),
+        field_name="duplex_request_metrics",
+    )
+    previous_sessions = _metric_rows(
+        None if existing is None else existing.get("duplex_session_metrics"),
+        field_name="duplex_session_metrics",
+    )
+    return build_duplex_metrics_report(
+        request_metrics=merge_metric_rows(previous_requests, request_metrics),
+        session_metrics=merge_metric_rows(previous_sessions, session_metrics),
+    )

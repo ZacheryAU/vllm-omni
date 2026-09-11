@@ -200,6 +200,35 @@ def test_native_text_metrics_exclude_cross_segment_gap(monkeypatch):
     assert second_segment["vllm_tpot_ms"] == pytest.approx(10.0)
 
 
+def test_native_text_tpot_weights_multi_token_engine_output(monkeypatch):
+    monkeypatch.setattr(VLLMOutputProcessor, "_update_stats_from_output", lambda *args, **kwargs: None)
+    processor = object.__new__(MultimodalOutputProcessor)
+    processor._native_text_metrics_by_request = {}
+    processor.lora_states = {}
+    state = _make_state(RequestOutputKind.DELTA)
+    iteration_stats = MagicMock()
+
+    def update_segment(_output, timestamp, _was_prefilling, native_stats, *_args):
+        native_stats.num_generation_tokens = 1 if timestamp == 10.0 else 4
+        native_stats.first_token_ts = 10.0
+        native_stats.last_token_ts = timestamp
+        native_stats.first_token_latency = 0.01
+
+    iteration_stats.update_from_output.side_effect = update_segment
+    state.is_prefilling = True
+    processor._update_stats_from_output(state, MagicMock(), 10.0, iteration_stats)
+    state.is_prefilling = False
+    processor._update_stats_from_output(state, MagicMock(), 10.03, iteration_stats)
+    record = processor.pop_native_text_metrics("r")
+
+    assert record["num_generation_tokens"] == 4
+    assert record["vllm_itls_ms"] == pytest.approx([30.0])
+    assert record["vllm_itl_ms"] == pytest.approx(30.0)
+    assert record["vllm_tpot_ms"] == pytest.approx(10.0)
+    assert "_tpot_elapsed_ms" not in record
+    assert "_tpot_intervals" not in record
+
+
 @pytest.mark.parametrize(
     ("finished_tpot_s", "expected_tpot_ms"),
     [(0.0, 19.0), (0.023, 23.0)],

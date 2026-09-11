@@ -1109,10 +1109,7 @@ class DuplexSession:
 
             tpot_ms = raw_values.get("vllm_tpot_ms")
             token_count = raw_values.get("num_tokens_out")
-            response_itls = current.get("vllm_itls_ms")
-            if isinstance(response_itls, list) and response_itls:
-                current["vllm_tpot_ms"] = current["vllm_itl_ms"]
-            elif isinstance(tpot_ms, int | float) and not isinstance(tpot_ms, bool) and tpot_ms > 0:
+            if isinstance(tpot_ms, int | float) and not isinstance(tpot_ms, bool) and tpot_ms > 0:
                 weight = (
                     max(int(token_count) - 1, 0)
                     if isinstance(token_count, int | float) and not isinstance(token_count, bool)

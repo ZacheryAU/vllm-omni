@@ -8797,6 +8797,26 @@ def test_response_tpot_fallback_ignores_single_token_segment():
     assert second_metrics["0"]["vllm_tpot_ms"] == 15.0
 
 
+def test_response_tpot_keeps_token_weighted_value_when_itls_exist():
+    session = DuplexSession(
+        session_id="sid-response-tpot-multi-token",
+        config=DuplexSessionConfig(extra_body={"auto_response": True}),
+    )
+    session.begin_response(turn_id=0)
+    metrics = session.accumulate_response_stage_metrics(
+        {
+            "0": {
+                "num_tokens_out": 4,
+                "vllm_tpot_ms": 10.0,
+                "vllm_itls_ms": [30.0],
+            }
+        }
+    )
+    assert metrics["0"]["vllm_itls_ms"] == [30.0]
+    assert metrics["0"]["vllm_itl_ms"] == 30.0
+    assert metrics["0"]["vllm_tpot_ms"] == 10.0
+
+
 @pytest.mark.asyncio
 async def test_continuous_response_metrics_accumulate_only_owned_model_units(monkeypatch):
     handler = OmniDuplexSessionHandler(chat_service=FakeChatService(FakeEngineClient()))
@@ -8814,7 +8834,7 @@ async def test_continuous_response_metrics_accumulate_only_owned_model_units(mon
     async def send_json(payload: dict[str, Any]) -> None:
         sent.append(payload)
 
-    async def emit(*, text: str, audio: str, tokens: int, ttft_ms: float, itls: list[float]) -> None:
+    async def emit(*, text: str, audio: str, tokens: int, ttft_ms: float, itls: list[float], tpot_ms: float) -> None:
         await handler._send_one_native_duplex_event(
             send_json,
             {
@@ -8833,7 +8853,7 @@ async def test_continuous_response_metrics_accumulate_only_owned_model_units(mon
                         "num_tokens_out": tokens,
                         "stage_gen_time_ms": 80.0,
                         "vllm_ttft_ms": ttft_ms,
-                        "vllm_tpot_ms": 9.0,
+                        "vllm_tpot_ms": tpot_ms,
                         "vllm_itls_ms": itls,
                     }
                 },
@@ -8841,8 +8861,8 @@ async def test_continuous_response_metrics_accumulate_only_owned_model_units(mon
             session=session,
         )
 
-    await emit(text="first", audio="audio-a", tokens=3, ttft_ms=50.0, itls=[10.0, 11.0])
-    await emit(text="second", audio="audio-b", tokens=4, ttft_ms=70.0, itls=[12.0, 13.0, 14.0])
+    await emit(text="first", audio="audio-a", tokens=3, ttft_ms=50.0, itls=[10.0, 11.0], tpot_ms=10.5)
+    await emit(text="second", audio="audio-b", tokens=4, ttft_ms=70.0, itls=[12.0, 13.0, 14.0], tpot_ms=13.0)
 
     deltas = [payload for payload in sent if payload.get("type") == "response.output_audio.delta"]
     assert len(deltas) == 2
@@ -8866,7 +8886,7 @@ async def test_continuous_response_metrics_accumulate_only_owned_model_units(mon
 
     first_response_id = deltas[0]["response_id"]
     session.end_response()
-    await emit(text="third", audio="audio-c", tokens=3, ttft_ms=90.0, itls=[15.0, 16.0])
+    await emit(text="third", audio="audio-c", tokens=3, ttft_ms=90.0, itls=[15.0, 16.0], tpot_ms=15.5)
 
     third_delta = [payload for payload in sent if payload.get("type") == "response.output_audio.delta"][-1]
     third_metrics = third_delta["vllm_omni"]["stage_metrics"]["0"]
