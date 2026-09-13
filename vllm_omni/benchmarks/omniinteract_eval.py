@@ -16,8 +16,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
 
-logger = logging.getLogger(__name__)
-
 from vllm_omni.benchmarks.data_modules.omniinteract_dataset import (
     OmniInteractCase,
     OmniInteractEvaluationOptions,
@@ -30,6 +28,8 @@ from vllm_omni.benchmarks.omniinteract_judge import (
     OmniInteractJudge,
     PartialJudgment,
 )
+
+logger = logging.getLogger(__name__)
 
 HARD = "Hard"
 SOFT = "Soft"
