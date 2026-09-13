@@ -35,7 +35,7 @@ import math
 import random
 import time
 import wave
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -80,6 +80,8 @@ __all__ = [
     "image_data_url",
     "read_pcm16_wav",
     "reference_audio_data_url",
+    "distribution_summary",
+    "metric_mean",
     "summarize_session_request_metrics",
     "wait_for_condition",
     "write_pcm16_wav",
@@ -1277,6 +1279,36 @@ def _interval_summary(values: list[float]) -> dict[str, float | int]:
     }
 
 
+def distribution_summary(values: Sequence[float], *, digits: int = 3) -> dict[str, float | int] | None:
+    """Summarize values as ``{count, mean, p50, p99}`` for duplex report fields."""
+    clean = sorted(float(value) for value in values if math.isfinite(float(value)))
+    if not clean:
+        return None
+
+    def nearest_rank(percentile: float) -> float:
+        index = max(0, math.ceil(percentile * len(clean)) - 1)
+        return clean[min(index, len(clean) - 1)]
+
+    return {
+        "count": len(clean),
+        "mean": round(sum(clean) / len(clean), digits),
+        "p50": round(nearest_rank(0.50), digits),
+        "p99": round(nearest_rank(0.99), digits),
+    }
+
+
+def metric_mean(value: object) -> float | None:
+    """Read a scalar mean, or the ``mean`` field of a distribution summary."""
+    if isinstance(value, Mapping):
+        nested = value.get("mean")
+        if isinstance(nested, int | float) and not isinstance(nested, bool) and math.isfinite(float(nested)):
+            return float(nested)
+        return None
+    if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(float(value)):
+        return float(value)
+    return None
+
+
 def _event_stage_metrics(event: dict[str, object]) -> dict[str, object] | None:
     candidates: list[object] = [event.get("vllm_omni")]
     metadata = event.get("metadata")
@@ -1816,18 +1848,20 @@ def summarize_session_request_metrics(
     *,
     session_id: str | None,
 ) -> dict[str, object]:
-    """Average client- and engine-observed metrics across audio responses.
+    """Summarize client- and engine-observed metrics across audio responses.
 
     ``request_metrics`` entries are caller-assembled dicts; keys that are
     absent or non-numeric in an entry are simply skipped. ``rtf`` is not
     produced by :meth:`EventCollector.timing_summary` (which reports raw data
-    only) — callers that want ``mean_rtf`` add an ``rtf`` value per turn,
+    only) — callers that want session ``rtf`` add an ``rtf`` value per turn,
     e.g. via ``vllm_omni.metrics.definitions.compute_audio_rtf``. Zero or
-    missing ``tpot_ms`` values are omitted from ``mean_tpot_ms``.
+    missing ``tpot_ms`` values are omitted from session ``tpot_ms``.
+
+    Aggregatable fields are nested as ``{count, mean, p50, p99}``.
     """
 
-    def mean(metric: str, *, digits: int = 3, positive: bool = False) -> float | None:
-        values = [
+    def values(metric: str, *, positive: bool = False) -> list[float]:
+        return [
             float(request[metric])
             for request in request_metrics
             if isinstance(request.get(metric), int | float)
@@ -1835,17 +1869,16 @@ def summarize_session_request_metrics(
             and math.isfinite(float(request[metric]))
             and (not positive or float(request[metric]) > 0)
         ]
-        return round(sum(values) / len(values), digits) if values else None
 
     summary: dict[str, object] = {
         "session_id": session_id,
         "audio_turn_count": len(request_metrics),
-        "mean_ttft_ms": mean("ttft_ms"),
-        "mean_ttfp_ms": mean("ttfp_ms"),
-        "mean_rtf": mean("rtf", digits=6),
+        "ttft_ms": distribution_summary(values("ttft_ms")),
+        "ttfp_ms": distribution_summary(values("ttfp_ms")),
+        "rtf": distribution_summary(values("rtf"), digits=6),
     }
-    if (mean_tpot_ms := mean("tpot_ms", positive=True)) is not None:
-        summary["mean_tpot_ms"] = mean_tpot_ms
+    if (tpot := distribution_summary(values("tpot_ms", positive=True))) is not None:
+        summary["tpot_ms"] = tpot
     return summary
 
 

@@ -6,7 +6,7 @@
 ``generate`` still writes per-sample timed sentences and ``*.meta.json``.
 Duplex performance metrics are written to ``<response-root>/duplex_metrics.json``.
 Skipped samples keep previously recorded rows; incoming ``(split, sample_id)``
-rows replace the matching ones, then ``mean_duplex_global_*`` is recomputed.
+rows replace the matching ones, then ``duplex_stream_*`` is recomputed.
 """
 
 import argparse

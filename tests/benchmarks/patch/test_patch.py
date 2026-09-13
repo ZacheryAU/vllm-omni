@@ -296,14 +296,16 @@ async def test_seed_tts_realtime_duplex_exports_per_request_metrics(monkeypatch)
             "audio_generation_ms": pytest.approx(30.0, abs=2.0),
             "audio_duration_ms": 100.0,
         }
-    assert output.duplex_session_metrics == {
-        "session_id": session_id,
-        "audio_turn_count": 4,
-        "mean_ttft_ms": pytest.approx(20.0, abs=2.0),
-        "mean_tpot_ms": 10.0,
-        "mean_ttfp_ms": pytest.approx(30.0, abs=2.0),
-        "mean_rtf": pytest.approx(0.3, abs=0.03),
-    }
+    session = output.duplex_session_metrics
+    assert session["session_id"] == session_id
+    assert session["audio_turn_count"] == 4
+    assert session["ttft_ms"]["count"] == 4
+    assert session["ttft_ms"]["mean"] == pytest.approx(20.0, abs=2.0)
+    assert session["tpot_ms"] == {"count": 4, "mean": 10.0, "p50": 10.0, "p99": 10.0}
+    assert session["ttfp_ms"]["count"] == 4
+    assert session["ttfp_ms"]["mean"] == pytest.approx(30.0, abs=2.0)
+    assert session["rtf"]["count"] == 4
+    assert session["rtf"]["mean"] == pytest.approx(0.3, abs=0.03)
 
 
 def test_stage0_token_timings_use_weighted_tpot_when_itls_are_incomplete():

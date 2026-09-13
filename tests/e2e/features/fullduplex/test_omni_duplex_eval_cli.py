@@ -67,9 +67,9 @@ def test_cli_generate_evaluate_summarize_flow(tmp_path: Path, monkeypatch: pytes
             session_metrics={
                 "sample_id": sample.id,
                 "split": sample.split,
-                "global_ttft_ms": 10.0,
-                "global_ttfp_ms": 20.0,
-                "global_rtf": 0.5,
+                "stream_ttft_ms": 10.0,
+                "stream_ttfp_ms": 20.0,
+                "stream_rtf": 0.5,
             },
         )
 
@@ -112,9 +112,9 @@ def test_cli_generate_evaluate_summarize_flow(tmp_path: Path, monkeypatch: pytes
             "rtf": 0.5,
         }
     ]
-    assert duplex_metrics["mean_duplex_global_ttft_ms"] == 10.0
-    assert duplex_metrics["mean_duplex_global_ttfp_ms"] == 20.0
-    assert duplex_metrics["mean_duplex_global_rtf"] == 0.5
+    assert duplex_metrics["duplex_stream_ttft_ms"]["mean"] == 10.0
+    assert duplex_metrics["duplex_stream_ttfp_ms"]["mean"] == 20.0
+    assert duplex_metrics["duplex_stream_rtf"]["mean"] == 0.5
     evaluate = parser.parse_args(
         [
             "evaluate",
@@ -199,7 +199,7 @@ async def test_generate_exercises_realtime_socket_and_media_clock(tmp_path: Path
     assert "duplex_request_metrics" not in meta
     assert result.request_metrics
     assert result.request_metrics[0]["sample_id"] == "sample"
-    assert result.session_metrics["global_ttfp_ms"] is not None
+    assert result.session_metrics["stream_ttfp_ms"] is not None
     assert any(event["type"] == "playback.ack" for event in received)
 
 
@@ -252,9 +252,9 @@ def _metrics_for(sample_id: str, *, ttft_ms: float, ttfp_ms: float, rtf: float) 
         session_metrics={
             "sample_id": sample_id,
             "split": split,
-            "global_ttft_ms": ttft_ms,
-            "global_ttfp_ms": ttfp_ms,
-            "global_rtf": rtf,
+            "stream_ttft_ms": ttft_ms,
+            "stream_ttfp_ms": ttfp_ms,
+            "stream_rtf": rtf,
         },
     )
 
@@ -290,18 +290,18 @@ def test_merge_duplex_metrics_report_replaces_only_incoming_sample_keys():
             {"sample_id": "replaced", "split": "PR_correction", "ttft_ms": 12.0},
         ],
         session_metrics=[
-            {"sample_id": "kept", "split": "PR_correction", "global_ttft_ms": 11.0},
-            {"sample_id": "replaced", "split": "PR_correction", "global_ttft_ms": 12.0},
+            {"sample_id": "kept", "split": "PR_correction", "stream_ttft_ms": 11.0},
+            {"sample_id": "replaced", "split": "PR_correction", "stream_ttft_ms": 12.0},
         ],
     )
     merged = merge_duplex_metrics_report(
         existing,
         request_metrics=[{"sample_id": "replaced", "split": "PR_correction", "ttft_ms": 99.0}],
-        session_metrics=[{"sample_id": "replaced", "split": "PR_correction", "global_ttft_ms": 99.0}],
+        session_metrics=[{"sample_id": "replaced", "split": "PR_correction", "stream_ttft_ms": 99.0}],
     )
     assert [row["sample_id"] for row in merged["duplex_request_metrics"]] == ["kept", "replaced"]
     assert merged["duplex_request_metrics"][1]["ttft_ms"] == 99.0
-    assert merged["mean_duplex_global_ttft_ms"] == 55.0
+    assert merged["duplex_stream_ttft_ms"]["mean"] == 55.0
 
 
 def test_read_duplex_metrics_report_returns_none_when_missing(tmp_path: Path):
@@ -319,10 +319,10 @@ def test_merge_duplex_metrics_report_without_existing_is_passthrough():
     merged = merge_duplex_metrics_report(
         None,
         request_metrics=[{"sample_id": "a", "split": "PR_correction", "ttft_ms": 1.0}],
-        session_metrics=[{"sample_id": "a", "split": "PR_correction", "global_ttft_ms": 1.0}],
+        session_metrics=[{"sample_id": "a", "split": "PR_correction", "stream_ttft_ms": 1.0}],
     )
     assert merged["duplex_request_metrics"][0]["ttft_ms"] == 1.0
-    assert merged["mean_duplex_global_ttft_ms"] == 1.0
+    assert merged["duplex_stream_ttft_ms"]["mean"] == 1.0
 
 
 def test_merge_duplex_metrics_report_rejects_non_object_rows():
@@ -347,9 +347,9 @@ def test_cli_generate_all_skipped_keeps_existing_metrics(tmp_path: Path, monkeyp
     _run_generate_cli(manifest, response_root)
     duplex_metrics = json.loads((response_root / DUPLEX_METRICS_FILENAME).read_text(encoding="utf-8"))
     assert duplex_metrics["duplex_request_metrics"][0]["ttft_ms"] == 10.0
-    assert duplex_metrics["mean_duplex_global_ttft_ms"] == 10.0
-    assert duplex_metrics["mean_duplex_global_ttfp_ms"] == 20.0
-    assert duplex_metrics["mean_duplex_global_rtf"] == 0.5
+    assert duplex_metrics["duplex_stream_ttft_ms"]["mean"] == 10.0
+    assert duplex_metrics["duplex_stream_ttfp_ms"]["mean"] == 20.0
+    assert duplex_metrics["duplex_stream_rtf"]["mean"] == 0.5
 
 
 def test_cli_generate_partial_resume_merges_metrics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -381,9 +381,9 @@ def test_cli_generate_partial_resume_merges_metrics(tmp_path: Path, monkeypatch:
     by_id = {row["sample_id"]: row for row in duplex_metrics["duplex_request_metrics"]}
     assert by_id["sample-1"]["ttft_ms"] == 10.0
     assert by_id["sample-2"]["ttft_ms"] == 90.0
-    assert duplex_metrics["mean_duplex_global_ttft_ms"] == 50.0
-    assert duplex_metrics["mean_duplex_global_ttfp_ms"] == 50.0
-    assert duplex_metrics["mean_duplex_global_rtf"] == 1.0
+    assert duplex_metrics["duplex_stream_ttft_ms"]["mean"] == 50.0
+    assert duplex_metrics["duplex_stream_ttfp_ms"]["mean"] == 50.0
+    assert duplex_metrics["duplex_stream_rtf"]["mean"] == 1.0
 
 
 def test_collect_duplex_session_metrics_matches_omniinteract_window():
@@ -407,14 +407,14 @@ def test_collect_duplex_session_metrics_matches_omniinteract_window():
     assert bundle.request_metrics[0]["ttft_ms"] == 100.0
     assert bundle.request_metrics[0]["ttfp_ms"] == 200.0
     assert bundle.request_metrics[0]["rtf"] == 2.0
-    assert bundle.session_metrics["global_ttft_ms"] == 200.0
-    assert bundle.session_metrics["global_ttfp_ms"] == 300.0
+    assert bundle.session_metrics["stream_ttft_ms"] == 200.0
+    assert bundle.session_metrics["stream_ttfp_ms"] == 300.0
     report = build_duplex_metrics_report(
         request_metrics=bundle.request_metrics,
         session_metrics=[bundle.session_metrics],
     )
-    assert report["mean_duplex_global_ttft_ms"] == 200.0
-    assert report["mean_duplex_global_ttfp_ms"] == 300.0
+    assert report["duplex_stream_ttft_ms"]["mean"] == 200.0
+    assert report["duplex_stream_ttfp_ms"]["mean"] == 300.0
 
 
 def test_judge_exercises_openai_http_schema():

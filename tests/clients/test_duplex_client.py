@@ -755,8 +755,13 @@ def test_session_summary_omits_unmeasured_zero_tpot():
         session_id="session",
     )
 
-    assert summary["mean_ttft_ms"] == 150.0
-    assert "mean_tpot_ms" not in summary
+    assert summary["ttft_ms"] == {
+        "count": 2,
+        "mean": 150.0,
+        "p50": 100.0,
+        "p99": 200.0,
+    }
+    assert "tpot_ms" not in summary
 
 
 def test_event_collector_reports_global_metrics_across_responses():
@@ -952,9 +957,9 @@ def test_summarize_session_request_metrics_averages_audio_turns():
     assert summary == {
         "session_id": "sess-1",
         "audio_turn_count": 2,
-        "mean_ttft_ms": 200.0,
-        "mean_ttfp_ms": 300.0,
-        "mean_rtf": 0.6,
+        "ttft_ms": {"count": 2, "mean": 200.0, "p50": 100.0, "p99": 300.0},
+        "ttfp_ms": {"count": 2, "mean": 300.0, "p50": 200.0, "p99": 400.0},
+        "rtf": {"count": 2, "mean": 0.6, "p50": 0.5, "p99": 0.7},
     }
 
 

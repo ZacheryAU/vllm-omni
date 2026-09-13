@@ -1200,9 +1200,9 @@ def test_realtime_duplex_demo_partitions_timing_by_response_identity():
     assert session_metrics == {
         "session_id": "seed-tts-session",
         "audio_turn_count": 2,
-        "mean_ttft_ms": 150.0,
-        "mean_ttfp_ms": 250.0,
-        "mean_rtf": 3.125,
+        "ttft_ms": {"count": 2, "mean": 150.0, "p50": 150.0, "p99": 150.0},
+        "ttfp_ms": {"count": 2, "mean": 250.0, "p50": 200.0, "p99": 300.0},
+        "rtf": {"count": 2, "mean": 3.125, "p50": 2.5, "p99": 3.75},
     }
 
 

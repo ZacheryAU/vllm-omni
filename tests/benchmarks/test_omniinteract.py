@@ -148,7 +148,7 @@ def _successful_output(
     return case, collector, result
 
 
-def test_response_metrics_include_engine_tpot_and_global_stream_window():
+def test_response_metrics_include_engine_tpot_and_stream_window():
     first_audio = _audio("r1")
     first_audio["metadata"] = {
         "audio_duration_ms": 100,
@@ -194,16 +194,16 @@ def test_response_metrics_include_engine_tpot_and_global_stream_window():
     assert result.duplex_session_metrics == {
         "session_id": "session",
         "audio_turn_count": 2,
-        "mean_ttft_ms": 100.0,
-        "mean_tpot_ms": 15.0,
-        "mean_ttfp_ms": 300.0,
-        "mean_rtf": 2.0,
-        "global_ttft_ms": 200.0,
-        "global_ttfp_ms": 300.0,
-        "global_rtf": 8.333333,
-        "global_audio_generation_ms": 2500.0,
-        "global_audio_duration_ms": 300.0,
-        "global_measurement_origin": {
+        "ttft_ms": {"count": 2, "mean": 100.0, "p50": 100.0, "p99": 100.0},
+        "tpot_ms": {"count": 2, "mean": 15.0, "p50": 10.0, "p99": 20.0},
+        "ttfp_ms": {"count": 2, "mean": 300.0, "p50": 200.0, "p99": 400.0},
+        "rtf": {"count": 2, "mean": 2.0, "p50": 2.0, "p99": 2.0},
+        "stream_ttft_ms": 200.0,
+        "stream_ttfp_ms": 300.0,
+        "stream_rtf": 8.333333,
+        "stream_audio_generation_ms": 2500.0,
+        "stream_audio_duration_ms": 300.0,
+        "stream_measurement_origin": {
             "ttft": "input stream start to first non-empty text delta",
             "ttfp": "input stream start to first audio packet",
             "rtf": (
@@ -711,7 +711,7 @@ async def test_adapter_requires_and_forwards_exact_prepared_payload(tmp_path: Pa
             transcript="timing metadata missing",
             output_tokens=0,
             duplex_request_metrics=[{"request_metrics": {"ttft_ms": 1.0}}],
-            duplex_session_metrics={"mean_ttft_ms": 10.0},
+            duplex_session_metrics={"ttft_ms": 10.0},
         )
 
     monkeypatch.setattr(benchmark_patch, "run_omniinteract_case", run)
@@ -779,7 +779,7 @@ async def test_adapter_reports_exact_or_weighted_token_timing(
             success=True,
             output_tokens=5,
             duplex_request_metrics=request_metrics,
-            duplex_session_metrics={"mean_ttft_ms": 100.0},
+            duplex_session_metrics={"ttft_ms": 100.0},
         )
 
     monkeypatch.setattr(benchmark_patch, "run_omniinteract_case", run)

@@ -6,7 +6,7 @@
 This module does not instrument the server. It reads the same
 ``EventCollector.timing_summary`` / ``global_timing_summary`` surfaces that
 OmniInteract already uses, derives RTF with ``compute_audio_rtf``, and folds
-per-session ``global_*`` values into a run-level report.
+per-session ``stream_*`` values into a run-level report.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ _REQUEST_MEASUREMENT_ORIGIN = {
     "tpot": "Stage-0 engine mean time per output token",
     "rtf": "response.created client receive to last audio packet divided by emitted audio duration",
 }
-_GLOBAL_MEASUREMENT_ORIGIN = {
+_STREAM_MEASUREMENT_ORIGIN = {
     "ttft": "input stream start to first non-empty text delta",
     "ttfp": "input stream start to first audio packet",
     "rtf": (
@@ -41,7 +41,7 @@ _GLOBAL_MEASUREMENT_ORIGIN = {
 
 @dataclass(frozen=True)
 class DuplexSessionMetricBundle:
-    """One session's request rows plus the session/global summary."""
+    """One session's request rows plus the session/stream summary."""
 
     request_metrics: list[dict[str, object]]
     session_metrics: dict[str, object]
@@ -63,11 +63,11 @@ def collect_duplex_session_metrics(
     stream_start: float,
     session_id: str | None,
 ) -> DuplexSessionMetricBundle:
-    """Build per-response and session/global metrics for one duplex session.
+    """Build per-response and session/stream metrics for one duplex session.
 
     ``stream_start`` is the client monotonic time just before input media is
     pushed. Per-response TTFT/TTFP prefer server ``response_request_metrics``
-    when present; RTF and the session ``global_*`` window stay client-receive.
+    when present; RTF and the session ``stream_*`` window stay client-receive.
     """
     from vllm_omni.clients.duplex import summarize_session_request_metrics
 
@@ -99,21 +99,21 @@ def collect_duplex_session_metrics(
         request_metrics,
         session_id=session_id,
     )
-    global_metrics = collector.global_timing_summary(
+    stream_metrics = collector.global_timing_summary(
         after_s=stream_start,
         window_started_at_s=stream_start,
         response_ids=list(collector.response_ids),
-        measurement_origin=_GLOBAL_MEASUREMENT_ORIGIN,
+        measurement_origin=_STREAM_MEASUREMENT_ORIGIN,
     )
-    if global_metrics:
+    if stream_metrics:
         session_metrics.update(
             {
-                "global_ttft_ms": global_metrics.get("ttft_ms"),
-                "global_ttfp_ms": global_metrics.get("ttfp_ms"),
-                "global_rtf": audio_rtf_from_raw_metric(global_metrics),
-                "global_audio_generation_ms": global_metrics.get("audio_generation_ms"),
-                "global_audio_duration_ms": global_metrics.get("audio_duration_ms"),
-                "global_measurement_origin": global_metrics.get("measurement_origin"),
+                "stream_ttft_ms": stream_metrics.get("ttft_ms"),
+                "stream_ttfp_ms": stream_metrics.get("ttfp_ms"),
+                "stream_rtf": audio_rtf_from_raw_metric(stream_metrics),
+                "stream_audio_generation_ms": stream_metrics.get("audio_generation_ms"),
+                "stream_audio_duration_ms": stream_metrics.get("audio_duration_ms"),
+                "stream_measurement_origin": stream_metrics.get("measurement_origin"),
             }
         )
     return DuplexSessionMetricBundle(
@@ -123,13 +123,15 @@ def collect_duplex_session_metrics(
     )
 
 
-def mean_duplex_global_metrics(session_metrics: Sequence[Mapping[str, object]]) -> dict[str, float]:
-    """Average finite, non-negative per-session ``global_*`` values."""
-    result: dict[str, float] = {}
-    for session_key, result_key in (
-        ("global_ttft_ms", "mean_duplex_global_ttft_ms"),
-        ("global_ttfp_ms", "mean_duplex_global_ttfp_ms"),
-        ("global_rtf", "mean_duplex_global_rtf"),
+def duplex_stream_metrics(session_metrics: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """Summarize finite, non-negative per-session ``stream_*`` values."""
+    from vllm_omni.clients.duplex import distribution_summary
+
+    result: dict[str, object] = {}
+    for session_key, result_key, digits in (
+        ("stream_ttft_ms", "duplex_stream_ttft_ms", 3),
+        ("stream_ttfp_ms", "duplex_stream_ttfp_ms", 3),
+        ("stream_rtf", "duplex_stream_rtf", 6),
     ):
         values = [
             float(value)
@@ -139,8 +141,9 @@ def mean_duplex_global_metrics(session_metrics: Sequence[Mapping[str, object]]) 
             and math.isfinite(value)
             and value >= 0
         ]
-        if values:
-            result[result_key] = sum(values) / len(values)
+        summary = distribution_summary(values, digits=digits)
+        if summary is not None:
+            result[result_key] = summary
     return result
 
 
@@ -154,7 +157,7 @@ def build_duplex_metrics_report(
         "duplex_request_metrics": [dict(metric) for metric in request_metrics],
         "duplex_session_metrics": [dict(metric) for metric in session_metrics],
     }
-    report.update(mean_duplex_global_metrics(session_metrics))
+    report.update(duplex_stream_metrics(session_metrics))
     return report
 
 
