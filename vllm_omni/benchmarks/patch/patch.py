@@ -429,7 +429,7 @@ async def _evaluate_omniinteract_batch(
             results,
             options.evaluation,
         )
-    except (OSError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 - post-hoc accuracy must not fail a finished benchmark
         logger.exception("OmniInteract evaluation failed")
         return {"status": "failed", "error": str(exc)}
 

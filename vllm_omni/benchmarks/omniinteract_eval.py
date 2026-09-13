@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 from collections import defaultdict
 from collections.abc import Mapping
@@ -14,6 +15,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
+
+logger = logging.getLogger(__name__)
 
 from vllm_omni.benchmarks.data_modules.omniinteract_dataset import (
     OmniInteractCase,
@@ -31,8 +34,11 @@ from vllm_omni.benchmarks.omniinteract_judge import (
 HARD = "Hard"
 SOFT = "Soft"
 PROTOCOL_SOURCE = "Lucky-Lance/OmniInteract@de304cef35fd9a50a5caadb5090c34cfbf0dd868"
+# Bump when slot scoring, judge prompts, or cached slot schema change.
+EVALUATOR_SCHEMA_VERSION = 1
 _HASH_CHUNK_BYTES = 65536
 _TRANSCRIPT_NAME = "wav_transcript.json"
+_PARSE_WARN_FRACTION = 0.1
 
 
 @dataclass(frozen=True)
@@ -158,6 +164,7 @@ class EvaluationInputsFingerprint:
     judge_base_url: str
     judge_max_tokens: int
     protocol_source: str
+    evaluator_schema_version: int
 
     @classmethod
     def from_mapping(cls, payload: object) -> EvaluationInputsFingerprint | None:
@@ -171,6 +178,7 @@ class EvaluationInputsFingerprint:
                 judge_base_url=_canonical_judge_base_url(str(payload["judge_base_url"])),
                 judge_max_tokens=int(payload["judge_max_tokens"]),
                 protocol_source=str(payload["protocol_source"]),
+                evaluator_schema_version=int(payload["evaluator_schema_version"]),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -208,6 +216,7 @@ def evaluation_inputs_fingerprint(
         judge_base_url=_canonical_judge_base_url(judge_base_url),
         judge_max_tokens=judge_max_tokens,
         protocol_source=PROTOCOL_SOURCE,
+        evaluator_schema_version=EVALUATOR_SCHEMA_VERSION,
     )
 
 
@@ -596,8 +605,17 @@ def _decay(value: float, peak: float, end: float, alpha: float, gamma: float) ->
     return max(0.0, min(1.0, 1.0 - alpha * (((value - peak) / (end - peak)) ** gamma)))
 
 
+def _aligned_chunk_text(chunk: MatchedChunk) -> str:
+    """Text the judge and trigger timer both search; prefer word-join when aligned."""
+
+    if not chunk.aligned_words:
+        return chunk.text
+    separator = "" if _contains_cjk("".join(word.text for word in chunk.aligned_words)) else " "
+    return separator.join(word.text for word in chunk.aligned_words)
+
+
 def _chunk_text(chunks: list[MatchedChunk]) -> str:
-    return "".join(chunk.text for chunk in chunks).strip()
+    return "".join(_aligned_chunk_text(chunk) for chunk in chunks).strip()
 
 
 def _full_context(stage_chunks: list[MatchedChunk], all_chunks: list[MatchedChunk] | None = None) -> str:
@@ -645,7 +663,7 @@ def _trigger_start(chunks: list[MatchedChunk], phrase: str) -> float | None:
             times.extend([None] * len(chunk.text))
             continue
         separator = "" if _contains_cjk("".join(word.text for word in chunk.aligned_words)) else " "
-        built_text = separator.join(word.text for word in chunk.aligned_words)
+        built_text = _aligned_chunk_text(chunk)
         built_times: list[float | None] = []
         for word_index, word in enumerate(chunk.aligned_words):
             built_times.extend([word.start] * len(word.text))
@@ -734,7 +752,9 @@ def _score_slot(
             _future_answers(slots, slot_index),
         )
         fallback_start = _core_effective_start(matched.core_chunks[0], slot.answer_time)
-        trigger_start = _trigger_start(matched.core_chunks, judgment.trigger_phrase) if judgment.score > 0 else None
+        trigger_phrase = judgment.trigger_phrase
+        trigger_start = _trigger_start(matched.core_chunks, trigger_phrase) if judgment.score > 0 else None
+        trigger_fallback = bool(trigger_phrase.strip()) and judgment.score > 0 and trigger_start is None
         answer_start = max(trigger_start if trigger_start is not None else fallback_start, slot.answer_time)
         t_core = _decay(
             answer_start,
@@ -753,7 +773,8 @@ def _score_slot(
             "actual_text": core_text,
             "answer_start": answer_start,
             "trigger_start": trigger_start,
-            "trigger_phrase": judgment.trigger_phrase,
+            "trigger_phrase": trigger_phrase,
+            "trigger_fallback": trigger_fallback,
             "spoiler": judgment.spoiler,
             "T_core": t_core,
             "S_core": judgment.score,
@@ -853,14 +874,53 @@ def _metric_number(value: object, default: float = 0.0) -> float:
     return default
 
 
-def _metric_sub(left: dict[str, object], right: dict[str, object]) -> dict[str, object]:
-    """Subtract nested inner/outer counts from question-type totals (paper Table 3)."""
+def _rows_metric(rows: list[dict[str, object]]) -> dict[str, object]:
+    return _metric(
+        sum(float(row["TP_n"]) for row in rows),
+        sum(int(row["FP_delta"]) for row in rows),
+        sum(int(row["FN_delta"]) for row in rows),
+        len(rows),
+    )
 
-    tp = _metric_number(left.get("Global_TP")) - _metric_number(right.get("Global_TP"))
-    fp = _metric_number(left.get("Global_FP")) - _metric_number(right.get("Global_FP"))
-    fn = _metric_number(left.get("Global_FN")) - _metric_number(right.get("Global_FN"))
-    slots = _metric_number(left.get("num_slots")) - _metric_number(right.get("num_slots"))
-    return _metric(tp, int(max(0.0, fp)), int(max(0.0, fn)), int(max(0.0, slots)))
+
+def _exclusive_question_type_rows(
+    rows: list[dict[str, object]],
+    question_type: str,
+    exclude_role: str,
+) -> list[dict[str, object]]:
+    """Exclusive Table 3 slices: filter rows instead of subtracting aggregates."""
+
+    return [
+        row
+        for row in rows
+        if _text(row.get("question_type")).lower() == question_type and _text(row.get("nested_role")) != exclude_role
+    ]
+
+
+def _judge_parse_summary(rows: list[dict[str, object]]) -> dict[str, object]:
+    counts = {"llm_json": 0, "llm_float_text": 0, "llm_parse_failed": 0}
+    total = 0
+    for row in rows:
+        for key in ("stage_early", "stage_core", "interruption_diagnostic"):
+            stage = row.get(key)
+            if not isinstance(stage, dict):
+                continue
+            source = _text(stage.get("parse_source"))
+            if not source:
+                continue
+            total += 1
+            if source in counts:
+                counts[source] += 1
+            else:
+                counts["llm_parse_failed"] += 1
+    non_json = counts["llm_float_text"] + counts["llm_parse_failed"]
+    return {**counts, "judge_calls": total, "non_json_calls": non_json}
+
+
+def _trigger_fallback_count(rows: list[dict[str, object]]) -> int:
+    return sum(
+        1 for row in rows if isinstance(row.get("stage_core"), dict) and bool(row["stage_core"].get("trigger_fallback"))
+    )
 
 
 def _group_metrics(rows: list[dict[str, object]], field: str) -> dict[str, object]:
@@ -907,24 +967,19 @@ def _group_map(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
-def _paper_metrics(summary: dict[str, object]) -> dict[str, object]:
-    """Build mutually exclusive Table 3 IA-QTF1 slices from aggregate groups."""
+def _paper_metrics(rows: list[dict[str, object]], summary: dict[str, object]) -> dict[str, object]:
+    """Build mutually exclusive Table 3 IA-QTF1 slices by filtering slot rows."""
 
-    by_scene_map = _group_map(summary.get("by_scene_type"))
-    by_qtype_map = _group_map(summary.get("by_question_type"))
     nested_role_map = _group_map(summary.get("nested_by_role"))
     interruption_raw = summary.get("interruption")
     interruption = interruption_raw if isinstance(interruption_raw, dict) else {}
     nested_raw = summary.get("nested")
     nested = nested_raw if isinstance(nested_raw, dict) else {}
 
-    realtime = _metric_sub(_as_metric(by_qtype_map.get("realtime")), _as_metric(nested_role_map.get("inner")))
-    proactive = _metric_sub(
-        _as_metric(by_qtype_map.get("proactive")),
-        _as_metric(nested_role_map.get("outer")),
-    )
-    nested_metric = _as_metric(by_scene_map.get("nested"))
-    one_qna = _as_metric(by_scene_map.get("1QnA"))
+    realtime = _rows_metric(_exclusive_question_type_rows(rows, "realtime", "inner"))
+    proactive = _rows_metric(_exclusive_question_type_rows(rows, "proactive", "outer"))
+    nested_metric = _rows_metric([row for row in rows if _text(row.get("scene_type")) == "nested"])
+    one_qna = _rows_metric([row for row in rows if _text(row.get("scene_type")) == "1QnA"])
 
     one_q1a_tp = (
         _metric_number(realtime.get("Global_TP"))
@@ -964,7 +1019,7 @@ def _paper_metrics(summary: dict[str, object]) -> dict[str, object]:
             },
             "definition": (
                 "Matches OmniInteract paper Table 3: realtime/proactive exclude nested "
-                "inner/outer slots; 1Q1A Global recomputes F1 from those three TP/FP/FN."
+                "inner/outer slots by row filter; 1Q1A Global recomputes F1 from those three."
             ),
         },
         "exp_interruption": {
@@ -1085,6 +1140,8 @@ def _summarize(rows: list[dict[str, object]], unmatched: int) -> dict[str, objec
     tp = sum(float(row["TP_n"]) for row in rows)
     fp = sum(int(row["FP_delta"]) for row in rows) + unmatched
     fn = sum(int(row["FN_delta"]) for row in rows)
+    judge_parse = _judge_parse_summary(rows)
+    trigger_fallbacks = _trigger_fallback_count(rows)
     summary = {
         **_metric(tp, fp, fn, len(rows)),
         "num_unmatched_chunks": unmatched,
@@ -1094,8 +1151,20 @@ def _summarize(rows: list[dict[str, object]], unmatched: int) -> dict[str, objec
         "interruption": _interruption_summary(rows),
         "nested": _nested_summary(rows),
         "scenario_case_counts": _scenario_case_counts(rows),
+        "judge_parse": judge_parse,
+        "trigger_fallback_slots": trigger_fallbacks,
     }
-    summary["paper_metrics"] = _paper_metrics(summary)
+    summary["paper_metrics"] = _paper_metrics(rows, summary)
+    calls = int(judge_parse.get("judge_calls", 0))
+    non_json = int(judge_parse.get("non_json_calls", 0))
+    if calls > 0 and non_json / calls >= _PARSE_WARN_FRACTION:
+        logger.warning(
+            "OmniInteract judge parse issues: %s/%s calls were non-JSON (llm_float_text=%s, llm_parse_failed=%s)",
+            non_json,
+            calls,
+            judge_parse.get("llm_float_text"),
+            judge_parse.get("llm_parse_failed"),
+        )
     return summary
 
 
@@ -1216,6 +1285,20 @@ def print_evaluation_report(evaluation: dict[str, object]) -> None:
         "Precision / Recall:",
         f"{summary.get('Precision', 0):.6f} / {summary.get('Recall', 0):.6f}",
     )
+    parse_raw = summary.get("judge_parse")
+    parse = parse_raw if isinstance(parse_raw, dict) else {}
+    judge_calls = int(_metric_number(parse.get("judge_calls")))
+    if judge_calls > 0:
+        _line(
+            "Judge parse:",
+            f"{int(_metric_number(parse.get('llm_json')))} json / "
+            f"{int(_metric_number(parse.get('llm_float_text')))} float_text / "
+            f"{int(_metric_number(parse.get('llm_parse_failed')))} failed "
+            f"(of {judge_calls})",
+        )
+    trigger_fallbacks = int(_metric_number(summary.get("trigger_fallback_slots")))
+    if trigger_fallbacks > 0:
+        _line("Trigger fallbacks:", trigger_fallbacks)
 
     # Hide IA-QTF1 slices that have no slots in this run (zeros are ambiguous).
     f1_slices = [

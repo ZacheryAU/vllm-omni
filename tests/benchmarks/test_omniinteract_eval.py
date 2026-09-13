@@ -543,3 +543,95 @@ def test_early_tp_ack_only_for_neutral(tmp_path: Path) -> None:
     evaluation = evaluate_case(case, result, _NonNeutralEarlyJudge(), tmp_path / "evaluation.json")
     assert evaluation["slots"][0]["TP_ack"] == 0.0
     assert evaluation["slots"][0]["stage_early"]["category"] == "other"
+
+
+def test_paper_metrics_unknown_inner_does_not_underflow_realtime() -> None:
+    summary = _summarize(
+        [
+            _slot_row(scene_type="multi_turn", question_type="realtime", tp_n=0.5),
+            _slot_row(
+                scene_type="nested",
+                question_type="unknown",
+                tp_n=2.0,
+                nested_role="inner",
+                nested_group_id=1,
+                answer_start=0.5,
+            ),
+            _slot_row(
+                scene_type="nested",
+                question_type="proactive",
+                tp_n=1.0,
+                nested_role="outer",
+                nested_group_id=1,
+                answer_start=1.5,
+            ),
+        ],
+        unmatched=0,
+    )
+    paper = summary["paper_metrics"]["exp_f1"]
+    assert paper["realtime"]["Global_TP"] == pytest.approx(0.5)
+    assert paper["realtime"]["num_slots"] == 1
+    assert paper["realtime"]["Precision"] >= 0.0
+    assert paper["one_q1a_global"]["Global_TP"] == pytest.approx(3.5)
+
+
+def test_core_score_float_ignores_leading_counts() -> None:
+    from vllm_omni.benchmarks.omniinteract_judge import _score_float_from_text
+
+    assert _score_float_from_text("The answer covers 3 of the 5 key points, score: 0.6") == pytest.approx(0.6)
+    assert _score_float_from_text("score: 3") is None
+    assert _score_float_from_text("no score here 0.9") is None
+
+    judge = _GeneratedJudge(["The answer covers 3 of the 5 key points, score: 0.6"])
+    core = judge.judge_core({"question_text": "q", "gt_answer": "a"}, "ctx", "answer", "(none)")
+    assert core.score == pytest.approx(0.6)
+    assert core.parse_source == "llm_float_text"
+
+
+def test_early_missing_score_and_unparsed_flag() -> None:
+    missing_score = _GeneratedJudge(['{"flag":"Neutral","rationale":"ok"}'])
+    early = missing_score.judge_early({"question_text": "q", "gt_answer": "a"}, "ctx", "hi")
+    assert early.category == "neutral"
+    assert early.score == 0.0
+    assert early.parse_source == "llm_json"
+
+    garbage = _GeneratedJudge(["not json and not a known flag"])
+    unparsed = garbage.judge_early({"question_text": "q", "gt_answer": "a"}, "ctx", "hi")
+    assert unparsed.category == "unparsed"
+    assert unparsed.score == 0.0
+    assert unparsed.parse_source == "llm_parse_failed"
+
+
+def test_fingerprint_requires_evaluator_schema_version() -> None:
+    from vllm_omni.benchmarks.omniinteract_eval import EvaluationInputsFingerprint
+
+    payload = {
+        "annotation_sha256": "a" * 64,
+        "transcript_sha256": "b" * 64,
+        "judge_model": "m",
+        "judge_base_url": "http://127.0.0.1:9",
+        "judge_max_tokens": 32,
+        "protocol_source": "proto",
+    }
+    assert EvaluationInputsFingerprint.from_mapping(payload) is None
+    payload["evaluator_schema_version"] = 1
+    assert EvaluationInputsFingerprint.from_mapping(payload) is not None
+    payload["evaluator_schema_version"] = 999
+    matched = EvaluationInputsFingerprint.from_mapping(payload)
+    assert matched is not None
+    assert matched.evaluator_schema_version == 999
+
+
+def test_summarize_counts_parse_sources() -> None:
+    rows = [
+        {
+            **_slot_row(scene_type="multi_turn", question_type="realtime", tp_n=1.0),
+            "stage_early": {"parse_source": "llm_json"},
+            "stage_core": {"parse_source": "llm_parse_failed", "trigger_fallback": True},
+        }
+    ]
+    summary = _summarize(rows, unmatched=0)
+    assert summary["judge_parse"]["llm_json"] == 1
+    assert summary["judge_parse"]["llm_parse_failed"] == 1
+    assert summary["judge_parse"]["judge_calls"] == 2
+    assert summary["trigger_fallback_slots"] == 1
