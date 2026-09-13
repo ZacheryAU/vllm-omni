@@ -15,11 +15,20 @@ are protocol-compatible rather than official paper-table numbers.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 import regex as re
 import requests
+
+_JUDGE_MAX_ATTEMPTS = 3
+_RETRYABLE_HTTP_STATUS = frozenset({502, 503, 504})
+_SCORE_FLOAT_PATTERN = re.compile(
+    r"""score["']?\s*[:=]\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)""",
+    re.IGNORECASE,
+)
 
 # Official English templates from OmniInteract llm_judge.py.
 # Paper appendix: Listing A.1 early, A.2 interrupted-partial, A.3 core.
@@ -189,14 +198,19 @@ def _first_json_object(text: str) -> dict[str, object] | None:
     return None
 
 
-def _first_float(text: str) -> float | None:
-    match = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", text)
+def _score_float_from_text(text: str) -> float | None:
+    """Parse a unit-interval score from text; ignore unrelated leading numbers."""
+
+    match = _SCORE_FLOAT_PATTERN.search(text)
     if match is None:
         return None
     try:
-        return float(match.group(0))
+        value = float(match.group(1))
     except ValueError:
         return None
+    if 0.0 <= value <= 1.0:
+        return value
+    return None
 
 
 def _chat_url(base_url: str) -> str:
@@ -229,38 +243,61 @@ class OmniInteractJudge:
         self.api_key = api_key or "EMPTY"
         self.timeout_s = timeout_s
         self.max_tokens = max_tokens
+        self._thread_local = threading.local()
+
+    def _session(self) -> requests.Session:
+        session = getattr(self._thread_local, "session", None)
+        if session is None:
+            session = requests.Session()
+            self._thread_local.session = session
+        return session
 
     def _generate(self, system_prompt: str, user_prompt: str) -> str:
-        try:
-            response = requests.post(
-                _chat_url(self.base_url),
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self.model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "temperature": 0.0,
-                    "stream": False,
-                    "max_tokens": self.max_tokens,
-                },
-                timeout=self.timeout_s,
-            )
-        except requests.RequestException as exc:
-            raise JudgeRequestError(f"judge request failed: {exc}") from exc
-        if not response.ok:
-            raise JudgeRequestError(f"judge returned HTTP {response.status_code}: {response.text[:500]}")
-        try:
-            payload = response.json()
-            choices = payload["choices"]
-            message = choices[0]["message"]
-            return str(message["content"])
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise JudgeRequestError(f"unexpected judge response: {response.text[:500]}") from exc
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.0,
+            "stream": False,
+            "max_tokens": self.max_tokens,
+        }
+        last_error: Exception | None = None
+        for attempt in range(_JUDGE_MAX_ATTEMPTS):
+            try:
+                response = self._session().post(
+                    _chat_url(self.base_url),
+                    headers=headers,
+                    json=payload,
+                    timeout=self.timeout_s,
+                )
+            except requests.Timeout as exc:
+                last_error = JudgeRequestError(f"judge request failed: {exc}")
+                if attempt + 1 < _JUDGE_MAX_ATTEMPTS:
+                    time.sleep(0.5 * (2**attempt))
+                    continue
+                raise last_error from exc
+            except requests.RequestException as exc:
+                raise JudgeRequestError(f"judge request failed: {exc}") from exc
+            if response.status_code in _RETRYABLE_HTTP_STATUS and attempt + 1 < _JUDGE_MAX_ATTEMPTS:
+                time.sleep(0.5 * (2**attempt))
+                continue
+            if not response.ok:
+                raise JudgeRequestError(f"judge returned HTTP {response.status_code}: {response.text[:500]}")
+            try:
+                body = response.json()
+                choices = body["choices"]
+                message = choices[0]["message"]
+                return str(message["content"])
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                raise JudgeRequestError(f"unexpected judge response: {response.text[:500]}") from exc
+        assert last_error is not None
+        raise last_error
 
     def judge_early(
         self,
@@ -287,21 +324,33 @@ class OmniInteractJudge:
         flag = _text(parsed.get("flag")) if parsed else raw.strip()
         normalized = flag.lower().replace("-", "_").replace(" ", "")
         if "hallucination" in normalized:
-            category, score = "hallucination", 0.0
-        elif "neutral" in normalized:
-            try:
-                score = _clamp(float(parsed.get("score", 1.0))) if parsed else 0.0
-            except (TypeError, ValueError):
-                score = 0.0
-            category = "neutral"
-        else:
-            category, score = "neutral", 0.0
+            return EarlyJudgment(
+                category="hallucination",
+                score=0.0,
+                rationale=_text(parsed.get("rationale")) if parsed else "",
+                raw=raw,
+                parse_source="llm_json" if parsed else "llm_parse_failed",
+            )
+        if "neutral" in normalized:
+            score = 0.0
+            if parsed is not None and "score" in parsed:
+                try:
+                    score = _clamp(float(parsed["score"]))
+                except (TypeError, ValueError):
+                    score = 0.0
+            return EarlyJudgment(
+                category="neutral",
+                score=score,
+                rationale=_text(parsed.get("rationale")) if parsed else "",
+                raw=raw,
+                parse_source="llm_json" if parsed else "llm_parse_failed",
+            )
         return EarlyJudgment(
-            category=category,
-            score=score,
+            category="unparsed",
+            score=0.0,
             rationale=_text(parsed.get("rationale")) if parsed else "",
             raw=raw,
-            parse_source="llm_json" if parsed else "llm_parse_failed",
+            parse_source="llm_parse_failed",
         )
 
     def judge_core(
@@ -334,9 +383,9 @@ class OmniInteractJudge:
                 score = _clamp(float(parsed.get("score", 0.0)))
             except (TypeError, ValueError):
                 score = None
-        fallback = _first_float(raw) if score is None else None
+        fallback = _score_float_from_text(raw) if score is None else None
         return CoreJudgment(
-            score=score if score is not None else _clamp(fallback) if fallback is not None else 0.0,
+            score=score if score is not None else fallback if fallback is not None else 0.0,
             trigger_phrase=_text(parsed.get("trigger_phrase")) if parsed else "",
             spoiler=_bool(parsed.get("spoiler")) if parsed else False,
             rationale=_text(parsed.get("rationale")) if parsed else "",
