@@ -77,6 +77,10 @@ class ResponseState:
     stage_metrics: dict[str, dict[str, object]] = field(default_factory=dict)
     stage_metric_tpot_weighted_ms: dict[str, float] = field(default_factory=dict)
     stage_metric_tpot_weight: dict[str, int] = field(default_factory=dict)
+    request_started_at_s_by_turn: dict[int, float] = field(default_factory=dict)
+    active_response_request_started_at_s: float | None = None
+    active_response_ttft_ms: float | None = None
+    active_response_ttfp_ms: float | None = None
 
 
 @dataclass
@@ -639,6 +643,11 @@ class DuplexEngineSession:
     def complete_model_turn(self, turn_id: int) -> None:
         """Advance the model-owned output identity after its terminal signal."""
         completed_turn_id = int(turn_id)
+        self._response.request_started_at_s_by_turn = {
+            pending_turn_id: started_at_s
+            for pending_turn_id, started_at_s in self._response.request_started_at_s_by_turn.items()
+            if pending_turn_id > completed_turn_id
+        }
         if completed_turn_id >= self.turn_id:
             self.turn_id = completed_turn_id + 1
             self.sync_fence()
@@ -676,6 +685,11 @@ class DuplexEngineSession:
         response_id = f"resp-{self.session_id}-{self.epoch}-{uuid4().hex[:8]}"
         self._response.active_response_id = response_id
         self._response.active_response_turn_id = self.turn_id if turn_id is None else int(turn_id)
+        self._clear_response_request_timing()
+        self._response.active_response_request_started_at_s = self._response.request_started_at_s_by_turn.pop(
+            self._response.active_response_turn_id,
+            None,
+        )
         self._response.active_response_input_commit_seq = self.input_commit_seq
         self._response.active_response_awaits_input_commit = self.turn_state == DuplexTurnState.USER_SPEAKING
         self._response.last_response_id = response_id
@@ -693,6 +707,50 @@ class DuplexEngineSession:
         self._response.stage_metrics.clear()
         self._response.stage_metric_tpot_weighted_ms.clear()
         self._response.stage_metric_tpot_weight.clear()
+
+    def _clear_response_request_timing(self) -> None:
+        self._response.active_response_request_started_at_s = None
+        self._response.active_response_ttft_ms = None
+        self._response.active_response_ttfp_ms = None
+
+    def mark_model_turn_request_started(self, turn_id: int, started_at_s: float) -> None:
+        """Record the latest native request start that can own one model turn."""
+        turn_id = int(turn_id)
+        started_at_s = float(started_at_s)
+        if self.active_response_turn_id == turn_id:
+            if self._response.active_response_request_started_at_s is None:
+                self._response.active_response_request_started_at_s = started_at_s
+            return
+        self._response.request_started_at_s_by_turn[turn_id] = started_at_s
+
+    def mark_response_first_outputs(
+        self,
+        *,
+        observed_at_s: float,
+        has_text: bool,
+        has_audio: bool,
+    ) -> dict[str, object]:
+        """Return server-monotonic TTF metrics observed for the active response."""
+        started_at_s = self._response.active_response_request_started_at_s
+        if started_at_s is None:
+            return {}
+        elapsed_ms = max(0.0, (float(observed_at_s) - started_at_s) * 1000.0)
+        if has_text and self._response.active_response_ttft_ms is None:
+            self._response.active_response_ttft_ms = elapsed_ms
+        if has_audio and self._response.active_response_ttfp_ms is None:
+            self._response.active_response_ttfp_ms = elapsed_ms
+        metrics: dict[str, object] = {
+            "source": "server_monotonic_request_start",
+            "measurement_origin": {
+                "ttft": "native model-turn request execution start to first non-empty text output",
+                "ttfp": "native model-turn request execution start to first audio output",
+            },
+        }
+        if self._response.active_response_ttft_ms is not None:
+            metrics["ttft_ms"] = self._response.active_response_ttft_ms
+        if self._response.active_response_ttfp_ms is not None:
+            metrics["ttfp_ms"] = self._response.active_response_ttfp_ms
+        return metrics
 
     def stash_stage_metrics(self, stage_metrics: Mapping[object, object] | None) -> None:
         """Hold a stage snapshot until a response exists to attribute it to.
@@ -964,6 +1022,7 @@ class DuplexEngineSession:
             self._response.active_request_id = None
         self._response.active_response_id = None
         self._response.active_response_turn_id = None
+        self._clear_response_request_timing()
         self._response.active_response_input_commit_seq = None
         self._response.active_response_awaits_input_commit = False
         self._clear_response_metrics()
@@ -1275,6 +1334,8 @@ class DuplexEngineSession:
         self._response.active_request_id = None
         self._response.active_response_id = None
         self._response.active_response_turn_id = None
+        self._response.request_started_at_s_by_turn.clear()
+        self._clear_response_request_timing()
         self._response.active_response_input_commit_seq = None
         self._response.active_response_awaits_input_commit = False
         self._clear_response_metrics()
@@ -1290,6 +1351,8 @@ class DuplexEngineSession:
         self.state = DuplexSessionState.CLOSED
         self.turn_state = DuplexTurnState.IDLE
         self._response.active_response_turn_id = None
+        self._response.request_started_at_s_by_turn.clear()
+        self._clear_response_request_timing()
         self._response.active_response_input_commit_seq = None
         self._response.active_response_awaits_input_commit = False
         self._clear_response_metrics()

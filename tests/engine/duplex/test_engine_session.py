@@ -610,3 +610,58 @@ def test_minicpmo_native_capabilities_do_not_overclaim_single_session_deployment
 
     assert caps["supports_multi_session"] is False
     assert caps["supports_multi_session_same_replica"] is False
+
+
+def test_response_timing_binds_latest_request_start_for_model_turn():
+    session = _session()
+    session.mark_model_turn_request_started(0, 10.0)
+    session.mark_model_turn_request_started(0, 11.0)
+    session.begin_response(turn_id=0)
+
+    assert session.mark_response_first_outputs(
+        observed_at_s=11.2,
+        has_text=True,
+        has_audio=False,
+    )["ttft_ms"] == pytest.approx(200.0)
+
+    session.mark_model_turn_request_started(0, 12.0)
+    assert session.mark_response_first_outputs(
+        observed_at_s=12.3,
+        has_text=False,
+        has_audio=True,
+    )["ttfp_ms"] == pytest.approx(1300.0)
+
+
+def test_response_timing_is_cleared_on_end_barge_in_and_close():
+    session = _session()
+    session.mark_model_turn_request_started(0, 10.0)
+    session.begin_response(turn_id=0)
+    assert session.mark_response_first_outputs(observed_at_s=10.2, has_text=True, has_audio=False)
+    session.end_response()
+    assert session.mark_response_first_outputs(observed_at_s=10.4, has_text=True, has_audio=False) == {}
+
+    session.mark_model_turn_request_started(0, 11.0)
+    session.barge_in()
+    session.begin_response(turn_id=0)
+    assert session.mark_response_first_outputs(observed_at_s=11.2, has_text=True, has_audio=False) == {}
+
+    session.mark_model_turn_request_started(0, 12.0)
+    session.close()
+    session.begin_response(turn_id=0)
+    assert session.mark_response_first_outputs(observed_at_s=12.2, has_text=True, has_audio=False) == {}
+
+
+def test_complete_model_turn_drops_request_starts_for_finished_turns():
+    session = _session()
+    session.mark_model_turn_request_started(0, 10.0)
+    session.mark_model_turn_request_started(1, 11.0)
+    session.complete_model_turn(0)
+    session.begin_response(turn_id=1)
+    assert session.mark_response_first_outputs(
+        observed_at_s=11.25,
+        has_text=True,
+        has_audio=False,
+    )["ttft_ms"] == pytest.approx(250.0)
+    session.end_response()
+    session.begin_response(turn_id=0)
+    assert session.mark_response_first_outputs(observed_at_s=11.5, has_text=True, has_audio=False) == {}

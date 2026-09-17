@@ -1108,6 +1108,37 @@ async def test_stage0_metrics_from_several_units_are_summed_into_one_response() 
         await close_harness(h)
 
 
+def _response_request_metrics_of(event: object) -> dict[str, object]:
+    """Server request-start clocks as the client reads them off one wire event."""
+    payload = event.to_realtime()
+    metadata = payload.get("metadata")
+    assert isinstance(metadata, dict), payload
+    vllm_omni = metadata.get("vllm_omni")
+    assert isinstance(vllm_omni, dict), metadata
+    metrics = vllm_omni.get("response_request_metrics")
+    assert isinstance(metrics, dict), vllm_omni
+    return metrics
+
+
+@pytest.mark.asyncio
+async def test_first_audio_delta_carries_server_request_start_metrics() -> None:
+    h = await open_harness()
+    try:
+        await h.run(append_audio())
+        request_id = h.stage0_request_id()
+        events = await h.deliver_and_settle(tts_output(request_id, samples=24000, text="hi"))
+        metrics = _response_request_metrics_of(find(events, "response.output_audio.delta"))
+        assert metrics["source"] == "server_monotonic_request_start"
+        assert metrics["measurement_origin"] == {
+            "ttft": "native model-turn request execution start to first non-empty text output",
+            "ttfp": "native model-turn request execution start to first audio output",
+        }
+        assert isinstance(metrics["ttft_ms"], int | float) and float(metrics["ttft_ms"]) >= 0.0
+        assert isinstance(metrics["ttfp_ms"], int | float) and float(metrics["ttfp_ms"]) >= 0.0
+    finally:
+        await close_harness(h)
+
+
 # --------------------------------------------------------------------------- #
 # Server VAD                                                                  #
 # --------------------------------------------------------------------------- #
