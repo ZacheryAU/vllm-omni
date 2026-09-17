@@ -359,6 +359,71 @@ def test_scenario_cover_and_focus_sampling(tmp_path: Path) -> None:
     assert {case.scene_type for case in focused} == {"nested", "1qna"}
 
 
+def test_load_cases_from_video_list_preserves_order_and_caps(tmp_path: Path) -> None:
+    root = _write_dataset(tmp_path)
+    all_cases = data.discover_omniinteract_cases(root, data.OMNIINTERACT_SUBSETS, num_prompts=0, disable_shuffle=True)
+    ordered = list(reversed(all_cases))
+    video_list = tmp_path / "sampled_cases.jsonl"
+    video_list.write_text("".join(json.dumps(data.sampled_case_row(case)) + "\n" for case in ordered))
+
+    capped = data.load_omniinteract_cases_from_video_list(video_list, num_prompts=2)
+    assert [case.video_path for case in capped] == [case.video_path for case in ordered[:2]]
+
+    full = data.load_omniinteract_cases_from_video_list(video_list, num_prompts=0)
+    assert [case.video_path for case in full] == [case.video_path for case in ordered]
+    oversized = data.load_omniinteract_cases_from_video_list(video_list, num_prompts=99)
+    assert [case.video_path for case in oversized] == [case.video_path for case in ordered]
+
+
+def test_load_cases_from_video_list_requires_existing_video(tmp_path: Path) -> None:
+    root = _write_dataset(tmp_path)
+    case = data.discover_omniinteract_cases(root, ("1q1a",), num_prompts=1, disable_shuffle=True)[0]
+    row = data.sampled_case_row(case)
+    row["video_path"] = str(tmp_path / "missing.mp4")
+    video_list = tmp_path / "bad.jsonl"
+    video_list.write_text(json.dumps(row) + "\n")
+    with pytest.raises(FileNotFoundError, match="video missing"):
+        data.load_omniinteract_cases_from_video_list(video_list, num_prompts=0)
+
+
+def test_get_samples_from_video_list_without_dataset_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _write_dataset(tmp_path)
+    cases = data.discover_omniinteract_cases(root, data.OMNIINTERACT_SUBSETS, num_prompts=0, disable_shuffle=True)
+    video_list = tmp_path / "sampled_cases.jsonl"
+    video_list.write_text("".join(json.dumps(data.sampled_case_row(case)) + "\n" for case in cases))
+    ref = tmp_path / "ref.wav"
+    ref.touch()
+    parser = TrackingArgumentParser()
+    OmniBenchmarkServingSubcommand.add_cli_args(parser)
+    args = parser.parse_args(
+        [
+            "--backend",
+            "openai-realtime-duplex",
+            "--dataset-name",
+            "omniinteract",
+            "--model",
+            MODEL,
+            "--endpoint",
+            "/v1/realtime",
+            "--num-prompts",
+            "2",
+            "--omniinteract-ref-audio",
+            str(ref),
+            "--omniinteract-video-list",
+            str(video_list),
+        ]
+    )
+    preprocess_serve_args(args)
+    monkeypatch.setattr(
+        "vllm_omni.clients.duplex.reference_audio_data_url",
+        lambda _: "data:audio/wav;base64,ref",
+    )
+    monkeypatch.setattr(benchmark_patch, "prepare_media", lambda *a, **k: (1.0, b"pcm", ["frame"]))
+    samples = benchmark_patch.get_samples(args, None)
+    assert len(samples) == 2
+    assert [sample.omniinteract_case.video_path for sample in samples] == [case.video_path for case in cases[:2]]
+
+
 def _write_overlapping_cover_dataset(root: Path) -> Path:
     data_root = root / "data"
     one_q1a = data_root / "1q1a"
@@ -717,6 +782,51 @@ def test_ineligible_outputs_are_excluded_from_manifest(tmp_path: Path, audio_tim
     assert reason in result.official_eval_ineligible_reasons
     oi.write_batch_artifacts(tmp_path / "out", [case], [result])
     assert (tmp_path / "out" / "official_eval_manifest.jsonl").read_text() == ""
+    sampled = [
+        json.loads(line) for line in (tmp_path / "out" / "sampled_cases.jsonl").read_text().splitlines() if line.strip()
+    ]
+    assert sampled == [
+        {
+            "video_path": str(case.video_path.resolve()),
+            "output_name": data.official_output_name(case),
+            "subset": case.subset,
+        }
+    ]
+
+
+def test_official_output_name_matches_minicpmo_batch_layout(tmp_path: Path):
+    one_q1a = _case(tmp_path, subset="1q1a", name="videos/clip_a.mp4")
+    one_qna = _case(tmp_path, subset="1qna", name="videos_bench/nested/guide.mp4")
+    assert data.official_output_name(one_q1a) == "1q1a/videos__clip_a"
+    assert data.official_output_name(one_qna) == "1qna/nested__guide"
+    row = data.sampled_case_row(one_q1a)
+    assert row["video_path"] == str(one_q1a.video_path.resolve())
+    assert row["output_name"] == "1q1a/videos__clip_a"
+    assert row["subset"] == "1q1a"
+
+
+def test_sampled_cases_jsonl_lists_every_case_including_failures(tmp_path: Path):
+    ok_case = _case(tmp_path, name="videos/ok.mp4")
+    bad_case = _case(tmp_path, name="videos/bad.mp4")
+    ok_result = oi.OmniInteractCaseResult(
+        ok_case.subset, str(ok_case.video_path), str(oi._output_dir(tmp_path / "out", ok_case)), success=True
+    )
+    ok_result.eligible_for_official_eval = True
+    bad_result = oi.OmniInteractCaseResult(
+        bad_case.subset, str(bad_case.video_path), str(oi._output_dir(tmp_path / "out", bad_case)), success=False
+    )
+    oi.write_batch_artifacts(tmp_path / "out", [ok_case, bad_case], [ok_result, bad_result])
+    sampled = [
+        json.loads(line) for line in (tmp_path / "out" / "sampled_cases.jsonl").read_text().splitlines() if line.strip()
+    ]
+    assert [row["output_name"] for row in sampled] == ["1q1a/videos__ok", "1q1a/videos__bad"]
+    manifest = [
+        json.loads(line)
+        for line in (tmp_path / "out" / "official_eval_manifest.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(manifest) == 1
+    assert manifest[0]["sample_id"].startswith("1q1a__")
 
 
 def test_artifacts_require_complete_audio_and_transcript_response(tmp_path: Path):

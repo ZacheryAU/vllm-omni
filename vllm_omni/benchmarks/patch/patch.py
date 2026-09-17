@@ -508,6 +508,7 @@ def get_samples(args, tokenizer):
             disable_shuffle=getattr(args, "disable_shuffle", False),
             scenario_tags=tuple(getattr(args, "omniinteract_scenario_tags", None) or ()),
             scenario_focus=bool(getattr(args, "omniinteract_scenario_focus", False)),
+            video_list=getattr(args, "omniinteract_video_list", None),
         )
         output_root = Path(getattr(args, "omniinteract_output_dir"))
         evaluation = None

@@ -86,18 +86,29 @@ class OmniInteractDataset(BenchmarkDataset):
         disable_shuffle: bool = False,
         scenario_tags: Sequence[str] = (),
         scenario_focus: bool = False,
+        video_list: str | Path | None = None,
     ) -> None:
         super().__init__(
             dataset_path=data_root or dataset_repo,
             random_seed=random_seed,
             disable_shuffle=disable_shuffle,
         )
-        self.root = resolve_omniinteract_root(data_root, dataset_repo)
+        self.video_list = Path(video_list).expanduser().resolve() if video_list else None
         self.subsets = tuple(subsets)
         self.scenario_tags = normalize_scenario_tags(scenario_tags)
         self.scenario_focus = bool(scenario_focus)
-        if self.scenario_focus and not self.scenario_tags:
-            raise ValueError("scenario_focus requires at least one scenario tag")
+        if self.video_list is not None:
+            if self.scenario_tags:
+                raise ValueError("OmniInteract video_list cannot be combined with scenario_tags")
+            if self.scenario_focus:
+                raise ValueError("OmniInteract video_list cannot be combined with scenario_focus")
+            if not self.video_list.is_file():
+                raise FileNotFoundError(f"--omniinteract-video-list does not exist: {self.video_list}")
+            self.root = None
+        else:
+            self.root = resolve_omniinteract_root(data_root, dataset_repo)
+            if self.scenario_focus and not self.scenario_tags:
+                raise ValueError("scenario_focus requires at least one scenario tag")
 
     def sample(
         self,
@@ -109,15 +120,19 @@ class OmniInteractDataset(BenchmarkDataset):
         **_: Any,
     ) -> list[SampleRequest]:
         del tokenizer
-        cases = discover_omniinteract_cases(
-            self.root,
-            self.subsets,
-            num_prompts=num_requests,
-            seed=self.random_seed,
-            disable_shuffle=self.disable_shuffle,
-            scenario_tags=self.scenario_tags,
-            scenario_focus=self.scenario_focus,
-        )
+        if self.video_list is not None:
+            cases = load_omniinteract_cases_from_video_list(self.video_list, num_prompts=num_requests)
+        else:
+            assert self.root is not None
+            cases = discover_omniinteract_cases(
+                self.root,
+                self.subsets,
+                num_prompts=num_requests,
+                seed=self.random_seed,
+                disable_shuffle=self.disable_shuffle,
+                scenario_tags=self.scenario_tags,
+                scenario_focus=self.scenario_focus,
+            )
         return [
             OmniInteractSampleRequest(
                 prompt="",
@@ -496,6 +511,143 @@ def discover_omniinteract_cases(
         scenario_tags=tags,
         scenario_focus=scenario_focus,
     )
+
+
+def _subset_root_for_video(video_path: Path, subset: str) -> Path:
+    """Find the subset data root that owns an absolute video path."""
+
+    if subset not in OMNIINTERACT_SUBSETS:
+        raise ValueError(f"Unsupported OmniInteract subset: {subset!r}")
+    parts = video_path.resolve().parts
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index] != subset:
+            continue
+        candidate = Path(*parts[: index + 1])
+        if subset == "1qna":
+            if (candidate / "videos_bench").is_dir() and (candidate / "annotations").is_dir():
+                return candidate
+        elif (candidate / "video_json_map.json").is_file():
+            return candidate
+    raise ValueError(f"Could not locate OmniInteract subset root for {subset!r} from {video_path}")
+
+
+def _case_from_video_list_row(row: dict[str, object], *, line_no: int) -> OmniInteractCase:
+    """Rebuild an ``OmniInteractCase`` from one ``sampled_cases.jsonl`` row."""
+
+    subset = str(row.get("subset") or "")
+    video_text = str(row.get("video_path") or "")
+    if not subset or not video_text:
+        raise ValueError(f"OmniInteract video_list line {line_no} requires subset and video_path")
+    video_path = Path(video_text).expanduser().resolve()
+    if not video_path.is_file():
+        raise FileNotFoundError(f"OmniInteract video_list line {line_no} video missing: {video_path}")
+
+    subset_root = _subset_root_for_video(video_path, subset)
+    if subset == "1qna":
+        videos_root = (subset_root / "videos_bench").resolve()
+        annotations_root = (subset_root / "annotations").resolve()
+        if not video_path.is_relative_to(videos_root):
+            raise ValueError(f"OmniInteract video_list line {line_no} is outside videos_bench: {video_path}")
+        relative = video_path.relative_to(videos_root)
+        annotation = (subset_root / "annotations" / relative).with_suffix(".json").resolve()
+        if not annotation.is_relative_to(annotations_root):
+            raise ValueError(f"OmniInteract video_list line {line_no} unsafe annotation path: {relative}")
+        if not annotation.is_file():
+            raise FileNotFoundError(f"OmniInteract video_list line {line_no} annotation missing: {annotation}")
+        case = OmniInteractCase(
+            subset,
+            f"videos_bench/{relative.as_posix()}",
+            video_path,
+            annotation,
+            "1qna",
+        )
+    else:
+        by_path = {case.video_path.resolve(): case for case in _mapping_cases(subset_root, subset)}
+        case = by_path.get(video_path)
+        if case is None:
+            raise ValueError(f"OmniInteract video_list line {line_no} is not in {subset} mapping: {video_path}")
+
+    expected_name = str(row.get("output_name") or "")
+    if expected_name and expected_name != official_output_name(case):
+        raise ValueError(
+            f"OmniInteract video_list line {line_no} output_name mismatch: "
+            f"{expected_name!r} != {official_output_name(case)!r}"
+        )
+    return case
+
+
+def load_omniinteract_cases_from_video_list(
+    video_list: str | Path,
+    *,
+    num_prompts: int,
+) -> list[OmniInteractCase]:
+    """Load cases from a ``sampled_cases.jsonl``-style list, preserving order.
+
+    ``num_prompts`` caps the prefix of the list. ``0`` or a value larger than the
+    list length selects every row.
+    """
+
+    if num_prompts < 0:
+        raise ValueError("num_prompts must be non-negative")
+    path = Path(video_list).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"--omniinteract-video-list does not exist: {path}")
+
+    cases: list[OmniInteractCase] = []
+    seen: set[Path] = set()
+    with path.open(encoding="utf-8") as handle:
+        for line_no, raw in enumerate(handle, start=1):
+            text = raw.strip()
+            if not text:
+                continue
+            try:
+                row = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"OmniInteract video_list line {line_no} is not valid JSON") from exc
+            if not isinstance(row, dict):
+                raise ValueError(f"OmniInteract video_list line {line_no} must be a JSON object")
+            case = _case_from_video_list_row(row, line_no=line_no)
+            if case.video_path in seen:
+                raise ValueError(f"OmniInteract video_list contains duplicate video_path: {case.video_path}")
+            seen.add(case.video_path)
+            cases.append(case)
+
+    if not cases:
+        raise ValueError(f"OmniInteract video_list is empty: {path}")
+    if num_prompts == 0 or num_prompts >= len(cases):
+        return cases
+    return cases[:num_prompts]
+
+
+def official_output_name(case: OmniInteractCase) -> str:
+    """Match Lucky-Lance/OmniInteract ``collect_all_videos`` output_name layout.
+
+    ``1q1a`` / ``1q1a_math`` use the mapping-relative video path with ``/`` →
+    ``__``. ``1qna`` strips the ``videos_bench/`` prefix before the same rewrite.
+    """
+
+    relative = case.video_rel.replace("\\", "/")
+    if case.subset == "1qna":
+        prefix = "videos_bench/"
+        if relative.startswith(prefix):
+            relative = relative[len(prefix) :]
+    stem = Path(relative).with_suffix("").as_posix().replace("/", "__")
+    return f"{case.subset}/{stem}"
+
+
+def sampled_case_row(case: OmniInteractCase) -> dict[str, str]:
+    """One official MiniCPM-o ``--video_list`` row for a sampled OmniInteract case.
+
+    ``video_path`` reuses the absolute path already resolved from ``--dataset-path``
+    (local tree or Hub extract). Official
+    ``batch_inference_minicpmo.py --video_list`` accepts these rows as-is.
+    """
+
+    return {
+        "video_path": str(case.video_path.resolve()),
+        "output_name": official_output_name(case),
+        "subset": case.subset,
+    }
 
 
 def case_manifest(case: OmniInteractCase, output_dir: Path) -> dict[str, Any]:

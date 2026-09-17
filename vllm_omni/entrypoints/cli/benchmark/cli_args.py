@@ -77,6 +77,16 @@ def add_omniinteract_cli_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     group.add_argument(
+        "--omniinteract-video-list",
+        type=_existing_file,
+        help=(
+            "JSONL of sampled OmniInteract cases (video_path, output_name, subset), "
+            "typically sampled_cases.jsonl from a prior run. Preserves list order. "
+            "Cannot be combined with --seed, --dataset-path, or --omniinteract-scenario-tags. "
+            "With this flag, --num-prompts caps the prefix of the list (0 or oversized = all)."
+        ),
+    )
+    group.add_argument(
         "--omniinteract-timeout-s", type=_positive_finite_float, default=900.0, help="Complete session timeout."
     )
     group.add_argument(
@@ -420,6 +430,16 @@ def preprocess_serve_args(args: argparse.Namespace) -> None:
             raise ValueError("OmniInteract requires --omniinteract-ref-audio")
         if getattr(args, "omniinteract_evaluate", False) and not getattr(args, "omniinteract_judge_model", None):
             raise ValueError("OmniInteract evaluation requires --omniinteract-judge-model")
+        if getattr(args, "omniinteract_video_list", None):
+            explicit = getattr(args, "explicit_keys", ())
+            if "seed" in explicit:
+                raise ValueError("--omniinteract-video-list cannot be combined with --seed")
+            if "dataset_path" in explicit:
+                raise ValueError("--omniinteract-video-list cannot be combined with --dataset-path")
+            if getattr(args, "omniinteract_scenario_tags", None):
+                raise ValueError("--omniinteract-video-list cannot be combined with --omniinteract-scenario-tags")
+            if getattr(args, "omniinteract_scenario_focus", False):
+                raise ValueError("--omniinteract-video-list cannot be combined with --omniinteract-scenario-focus")
         if getattr(args, "omniinteract_scenario_focus", False) and not getattr(
             args, "omniinteract_scenario_tags", None
         ):
