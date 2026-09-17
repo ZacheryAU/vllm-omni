@@ -46,6 +46,7 @@ from vllm_omni.engine.duplex.messages import (
     DuplexSessionEventMessage,
     OpenDuplexSessionMessage,
 )
+from vllm_omni.engine.duplex.session.engine_session import RESPONSE_REQUEST_MEASUREMENT_ORIGIN
 from vllm_omni.engine.duplex.session.manager import DuplexSessionManager
 from vllm_omni.engine.duplex.session.runner import DuplexSessionRunner
 from vllm_omni.metrics.stats import StageRequestStats, StageStats
@@ -1122,19 +1123,53 @@ def _response_request_metrics_of(event: object) -> dict[str, object]:
 
 @pytest.mark.asyncio
 async def test_first_audio_delta_carries_server_request_start_metrics() -> None:
-    h = await open_harness()
+    clock = {"now": 1000.0}
+    h = await open_harness(clock=lambda: clock["now"])
     try:
         await h.run(append_audio())
         request_id = h.stage0_request_id()
+        clock["now"] = 1001.3
         events = await h.deliver_and_settle(tts_output(request_id, samples=24000, text="hi"))
         metrics = _response_request_metrics_of(find(events, "response.output_audio.delta"))
         assert metrics["source"] == "server_monotonic_request_start"
-        assert metrics["measurement_origin"] == {
-            "ttft": "native model-turn request execution start to first non-empty text output",
-            "ttfp": "native model-turn request execution start to first audio output",
-        }
-        assert isinstance(metrics["ttft_ms"], int | float) and float(metrics["ttft_ms"]) >= 0.0
-        assert isinstance(metrics["ttfp_ms"], int | float) and float(metrics["ttfp_ms"]) >= 0.0
+        assert metrics["measurement_origin"] == dict(RESPONSE_REQUEST_MEASUREMENT_ORIGIN)
+        assert metrics["ttft_ms"] == pytest.approx(1300.0)
+        assert metrics["ttfp_ms"] == pytest.approx(1300.0)
+        speak_metrics = _response_request_metrics_of(find(events, "response.speak"))
+        assert speak_metrics["ttft_ms"] == pytest.approx(1300.0)
+        assert speak_metrics["ttfp_ms"] == pytest.approx(1300.0)
+
+        clock["now"] = 1002.0
+        later = await h.deliver_and_settle(tts_output(request_id, samples=48000, text="hello"))
+        later_payload = find(later, "response.output_audio.delta").to_realtime()
+        later_metadata = later_payload.get("metadata")
+        later_vllm_omni = later_metadata.get("vllm_omni") if isinstance(later_metadata, dict) else None
+        later_metrics = later_vllm_omni.get("response_request_metrics") if isinstance(later_vllm_omni, dict) else None
+        assert later_metrics is None
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
+async def test_stale_epoch_append_does_not_own_request_start() -> None:
+    clock = {"now": 1000.0}
+    h = await open_harness(clock=lambda: clock["now"])
+    try:
+        await h.run(append_audio())
+        request_id = h.stage0_request_id()
+        clock["now"] = 1000.5
+        append_ok, emitted = await h.runner.model.append_runtime_input(
+            {"duplex_turn_id": 0},
+            final=False,
+            expected_epoch=h.session.epoch + 1,
+        )
+        assert append_ok is True
+        assert emitted is False
+        clock["now"] = 1001.3
+        events = await h.deliver_and_settle(tts_output(request_id, samples=24000, text="hi"))
+        metrics = _response_request_metrics_of(find(events, "response.output_audio.delta"))
+        assert metrics["ttft_ms"] == pytest.approx(1300.0)
+        assert metrics["ttfp_ms"] == pytest.approx(1300.0)
     finally:
         await close_harness(h)
 

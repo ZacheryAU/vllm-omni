@@ -22,7 +22,6 @@ tracked task, and aborting a stage request in the background.
 from __future__ import annotations
 
 import asyncio
-import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
@@ -170,6 +169,7 @@ class ModelChannel:
             return True, False
         if expected_epoch is not None and session.epoch != expected_epoch:
             return True, False
+        self._mark_accepted_append_request_start(payload)
         request_id, _ = duplex_data_plane_request_info(result)
         if request_id is not None:
             self._ctx.plugin.data_plane.begin_request(request_id)
@@ -181,6 +181,16 @@ class ModelChannel:
             await self._close_from_runtime(close_reason)
             return False, emitted_response
         return True, emitted_response
+
+    def _mark_accepted_append_request_start(self, payload: object) -> None:
+        """Stamp TTFT/TTFP origin only after the data plane accepted this append."""
+        session = self._ctx.session
+        turn_id = payload_turn_id(payload)
+        if turn_id is None:
+            turn_id = (
+                session.active_response_turn_id if session.active_response_turn_id is not None else session.turn_id
+            )
+        session.mark_model_turn_request_started(turn_id, session._clock())
 
     async def _append_via_data_plane(
         self,
@@ -751,7 +761,7 @@ class ModelChannel:
             response_id = session.begin_response(turn_id=model_turn_id)
             response_created = True
         response_request_metrics = session.mark_response_first_outputs(
-            observed_at_s=time.monotonic(),
+            observed_at_s=session._clock(),
             has_text=has_text,
             has_audio=has_audio,
         )

@@ -381,8 +381,10 @@ class AudioDone(_ResponseEvent):
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TranscriptDelta(_ResponseEvent):
     wire_type = "response.output_audio_transcript.delta"
+    optional_wire_fields = frozenset({"metadata"})
 
     delta: str = ""
+    metadata: Mapping[str, object] | None = None
 
     @property
     def text(self) -> str | None:

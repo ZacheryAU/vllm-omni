@@ -83,6 +83,18 @@ class ResponseState:
     active_response_ttfp_ms: float | None = None
 
 
+RESPONSE_REQUEST_MEASUREMENT_ORIGIN: dict[str, str] = {
+    "ttft": (
+        "accepted native-append start to first non-empty text output; "
+        "pending turns keep the latest append before first output, so overlapping user speech shortens TTFT"
+    ),
+    "ttfp": (
+        "accepted native-append start to first audio output; "
+        "pending turns keep the latest append before first output, so overlapping user speech shortens TTFP"
+    ),
+}
+
+
 @dataclass
 class PlaybackLedger:
     current: DuplexPlaybackCursor = field(default_factory=DuplexPlaybackCursor)
@@ -714,7 +726,11 @@ class DuplexEngineSession:
         self._response.active_response_ttfp_ms = None
 
     def mark_model_turn_request_started(self, turn_id: int, started_at_s: float) -> None:
-        """Record the latest native request start that can own one model turn."""
+        """Record the native request start that can own one model turn.
+
+        Pending turns keep the latest accepted append. After ``begin_response``
+        the first accepted append wins; later appends must not rebind.
+        """
         turn_id = int(turn_id)
         started_at_s = float(started_at_s)
         if self.active_response_turn_id == turn_id:
@@ -730,21 +746,23 @@ class DuplexEngineSession:
         has_text: bool,
         has_audio: bool,
     ) -> dict[str, object]:
-        """Return server-monotonic TTF metrics observed for the active response."""
+        """Return server-monotonic TTF metrics newly observed for the active response."""
         started_at_s = self._response.active_response_request_started_at_s
         if started_at_s is None:
             return {}
         elapsed_ms = max(0.0, (float(observed_at_s) - started_at_s) * 1000.0)
+        newly_observed = False
         if has_text and self._response.active_response_ttft_ms is None:
             self._response.active_response_ttft_ms = elapsed_ms
+            newly_observed = True
         if has_audio and self._response.active_response_ttfp_ms is None:
             self._response.active_response_ttfp_ms = elapsed_ms
+            newly_observed = True
+        if not newly_observed:
+            return {}
         metrics: dict[str, object] = {
             "source": "server_monotonic_request_start",
-            "measurement_origin": {
-                "ttft": "native model-turn request execution start to first non-empty text output",
-                "ttfp": "native model-turn request execution start to first audio output",
-            },
+            "measurement_origin": dict(RESPONSE_REQUEST_MEASUREMENT_ORIGIN),
         }
         if self._response.active_response_ttft_ms is not None:
             metrics["ttft_ms"] = self._response.active_response_ttft_ms

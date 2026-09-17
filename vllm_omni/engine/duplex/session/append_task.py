@@ -18,14 +18,13 @@ fields make the captured state explicit and the compensation a method.
 from __future__ import annotations
 
 import asyncio
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from vllm.logger import init_logger
 
 from vllm_omni.engine.duplex.config import DuplexSessionState, DuplexTurnEventType
-from vllm_omni.engine.duplex.plugin import PcmAppendReservation, payload_turn_id
+from vllm_omni.engine.duplex.plugin import PcmAppendReservation
 from vllm_omni.engine.duplex.session import helpers
 from vllm_omni.engine.duplex.session.context import DuplexSessionContext
 from vllm_omni.engine.duplex.session.emitter import SessionEmitter
@@ -134,12 +133,6 @@ class AppendAttempt:
         session = self.ctx.session
         model_state = self.ctx.model_state
         try:
-            turn_id = payload_turn_id(self.payload)
-            if turn_id is None:
-                turn_id = (
-                    session.active_response_turn_id if session.active_response_turn_id is not None else session.turn_id
-                )
-            session.mark_model_turn_request_started(turn_id, time.monotonic())
             append_ok, emitted_response = await self.model.append_runtime_input(
                 self.payload,
                 operation_id=(

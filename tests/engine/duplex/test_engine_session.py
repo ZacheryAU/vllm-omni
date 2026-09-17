@@ -20,7 +20,11 @@ from vllm_omni.engine.duplex.config import (
 )
 from vllm_omni.engine.duplex.contracts import DuplexFence
 from vllm_omni.engine.duplex.events import TurnEvent
-from vllm_omni.engine.duplex.session.engine_session import DuplexEngineSession, DuplexFenceMismatchError
+from vllm_omni.engine.duplex.session.engine_session import (
+    RESPONSE_REQUEST_MEASUREMENT_ORIGIN,
+    DuplexEngineSession,
+    DuplexFenceMismatchError,
+)
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex.capabilities import (
     minicpmo45_native_capabilities,
 )
@@ -618,18 +622,39 @@ def test_response_timing_binds_latest_request_start_for_model_turn():
     session.mark_model_turn_request_started(0, 11.0)
     session.begin_response(turn_id=0)
 
-    assert session.mark_response_first_outputs(
+    first = session.mark_response_first_outputs(
         observed_at_s=11.2,
         has_text=True,
         has_audio=False,
-    )["ttft_ms"] == pytest.approx(200.0)
+    )
+    assert first["ttft_ms"] == pytest.approx(200.0)
+    assert first["measurement_origin"] == RESPONSE_REQUEST_MEASUREMENT_ORIGIN
+    assert "ttfp_ms" not in first
 
+    # After begin_response the origin is frozen at the pending start (11.0).
+    # The 12.0 append must not rebind, so TTFP is 12.3-11.0 = 1300 ms, not 300.
     session.mark_model_turn_request_started(0, 12.0)
-    assert session.mark_response_first_outputs(
+    audio = session.mark_response_first_outputs(
         observed_at_s=12.3,
         has_text=False,
         has_audio=True,
-    )["ttfp_ms"] == pytest.approx(1300.0)
+    )
+    assert audio["ttft_ms"] == pytest.approx(200.0)
+    assert audio["ttfp_ms"] == pytest.approx(1300.0)
+
+
+def test_response_timing_attaches_metrics_only_when_newly_observed():
+    session = _session()
+    session.mark_model_turn_request_started(0, 10.0)
+    session.begin_response(turn_id=0)
+
+    first = session.mark_response_first_outputs(observed_at_s=10.2, has_text=True, has_audio=False)
+    assert first["ttft_ms"] == pytest.approx(200.0)
+    assert session.mark_response_first_outputs(observed_at_s=10.3, has_text=True, has_audio=False) == {}
+    audio = session.mark_response_first_outputs(observed_at_s=10.4, has_text=False, has_audio=True)
+    assert audio["ttft_ms"] == pytest.approx(200.0)
+    assert audio["ttfp_ms"] == pytest.approx(400.0)
+    assert session.mark_response_first_outputs(observed_at_s=10.5, has_text=True, has_audio=True) == {}
 
 
 def test_response_timing_is_cleared_on_end_barge_in_and_close():
