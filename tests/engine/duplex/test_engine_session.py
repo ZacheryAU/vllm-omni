@@ -25,6 +25,7 @@ from vllm_omni.engine.duplex.session.engine_session import (
     DuplexEngineSession,
     DuplexFenceMismatchError,
 )
+from vllm_omni.metrics.stats import DUPLEX_STAGE_TABLE_EXCLUDE, OrchestratorAggregator, StageRequestStats, StageStats
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex.capabilities import (
     minicpmo45_native_capabilities,
 )
@@ -32,8 +33,45 @@ from vllm_omni.model_executor.models.minicpmo_4_5.duplex.capabilities import (
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
-def _session(session_id: str = "duplex-test", config: DuplexSessionConfig | None = None) -> DuplexEngineSession:
-    return DuplexEngineSession(session_id=session_id, config=config or DuplexSessionConfig(model="test-model"))
+def _session(
+    session_id: str = "duplex-test",
+    config: DuplexSessionConfig | None = None,
+    *,
+    num_stages: int = 1,
+    log_stats: bool = False,
+) -> DuplexEngineSession:
+    return DuplexEngineSession(
+        session_id=session_id,
+        config=config or DuplexSessionConfig(model="test-model"),
+        num_stages=num_stages,
+        log_stats=log_stats,
+    )
+
+
+def _stage_stats(
+    *,
+    stage_id: int,
+    request_id: str = "stage-req",
+    num_tokens_out: int = 3,
+    vllm_ttft_ms: float = 12.0,
+    serving_time_to_first_output_ms: float = 0.0,
+) -> StageRequestStats:
+    return StageRequestStats(
+        batch_id=0,
+        batch_size=1,
+        num_tokens_in=7,
+        num_tokens_out=num_tokens_out,
+        stage_gen_time_ms=120.0,
+        rx_transfer_bytes=0,
+        rx_decode_time_ms=0.0,
+        rx_in_flight_time_ms=0.0,
+        stage_stats=StageStats(),
+        stage_id=stage_id,
+        request_id=request_id,
+        final_output_type="text",
+        vllm_ttft_ms=vllm_ttft_ms,
+        serving_time_to_first_output_ms=serving_time_to_first_output_ms,
+    )
 
 
 def test_commit_audio_input_does_not_advance_model_turn_identity():
@@ -690,3 +728,104 @@ def test_complete_model_turn_drops_request_starts_for_finished_turns():
     session.end_response()
     session.begin_response(turn_id=0)
     assert session.mark_response_first_outputs(observed_at_s=11.5, has_text=True, has_audio=False) == {}
+
+
+def test_log_stats_off_does_not_open_a_response_aggregator():
+    session = _session()
+    session.begin_response()
+    session.observe_stage_request_stats(0, _stage_stats(stage_id=0))
+    assert session._response_aggregator is None
+    session.end_response()
+    assert session._response_aggregator is None
+
+
+def test_end_response_logs_pending_and_active_stage_request_stats(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(OrchestratorAggregator, "build_and_log_summary", lambda self: {})
+    session = _session(num_stages=2, log_stats=True)
+    wire_stats = _stage_stats(stage_id=0, request_id="stage0-req", num_tokens_out=3)
+    session.observe_stage_request_stats(0, wire_stats)
+    assert session._response_aggregator is None
+    assert wire_stats.request_id == "stage0-req"
+
+    response_id = session.begin_response()
+    aggregator = session._response_aggregator
+    assert aggregator is not None
+    assert aggregator.num_stages == 2
+    recorded = aggregator.stage_events[response_id]
+    assert recorded[0].num_tokens_out == 3
+    assert recorded[0].request_id == response_id
+    assert wire_stats.request_id == "stage0-req"
+
+    session.observe_stage_request_stats(1, _stage_stats(stage_id=1, num_tokens_out=5, vllm_ttft_ms=0.0))
+    assert [event.stage_id for event in aggregator.stage_events[response_id]] == [0, 1]
+
+    session.end_response()
+    assert session._response_aggregator is None
+    assert response_id in aggregator.e2e_done
+
+
+def test_end_response_prints_one_column_per_stage(monkeypatch: pytest.MonkeyPatch):
+    logged: list[OrchestratorAggregator] = []
+    monkeypatch.setattr(OrchestratorAggregator, "build_and_log_summary", lambda self: logged.append(self) or {})
+    session = _session(num_stages=3, log_stats=True)
+    session.observe_stage_request_stats(0, _stage_stats(stage_id=0, num_tokens_out=3, vllm_ttft_ms=40.0))
+    response_id = session.begin_response()
+    session.observe_stage_request_stats(0, _stage_stats(stage_id=0, num_tokens_out=4, vllm_ttft_ms=12.0))
+    session.observe_stage_request_stats(1, _stage_stats(stage_id=1, num_tokens_out=5, vllm_ttft_ms=20.0))
+    session.observe_stage_request_stats(1, _stage_stats(stage_id=1, num_tokens_out=6, vllm_ttft_ms=0.0))
+    session.observe_stage_request_stats(2, _stage_stats(stage_id=2, num_tokens_out=0, vllm_ttft_ms=0.0))
+    session.end_response()
+
+    assert len(logged) == 1
+    rows = logged[0].stage_events[response_id]
+    assert [event.stage_id for event in rows] == [0, 1, 2]
+    assert rows[0].num_tokens_out == 7
+    assert rows[0].vllm_ttft_ms == pytest.approx(40.0)
+    assert rows[1].num_tokens_out == 11
+    assert rows[1].vllm_ttft_ms == pytest.approx(20.0)
+    assert logged[0].stage_table_exclude == DUPLEX_STAGE_TABLE_EXCLUDE
+
+
+def test_end_response_omits_serving_time_to_first_output_from_stage_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = OrchestratorAggregator.build_and_log_summary
+    captured: list[tuple[OrchestratorAggregator, dict[str, object]]] = []
+
+    def _capture(self: OrchestratorAggregator) -> dict[str, object]:
+        summary = original(self)
+        captured.append((self, summary))
+        return summary
+
+    monkeypatch.setattr(OrchestratorAggregator, "build_and_log_summary", _capture)
+    session = _session(num_stages=3, log_stats=True)
+    response_id = session.begin_response()
+    session.observe_stage_request_stats(0, _stage_stats(stage_id=0, serving_time_to_first_output_ms=80.631))
+    session.observe_stage_request_stats(1, _stage_stats(stage_id=1, serving_time_to_first_output_ms=418.829))
+    session.observe_stage_request_stats(
+        2, _stage_stats(stage_id=2, vllm_ttft_ms=0.0, serving_time_to_first_output_ms=487.109)
+    )
+    session.end_response()
+
+    assert len(captured) == 1
+    aggregator, summary = captured[0]
+    stage_table = summary.get("stage_table")
+    assert isinstance(stage_table, list) and stage_table
+    rows = stage_table[0]["stages"]
+    assert isinstance(rows, list)
+    assert [row["stage_id"] for row in rows] == [0, 1, 2]
+    assert all("serving_time_to_first_output_ms" not in row for row in rows)
+    assert all("vllm_ttft_ms" in row for row in rows)
+    events = aggregator.stage_events[response_id]
+    assert [event.serving_time_to_first_output_ms for event in events] == pytest.approx([80.631, 418.829, 487.109])
+
+
+def test_http_stage_table_keeps_serving_time_to_first_output() -> None:
+    agg = OrchestratorAggregator(num_stages=2, log_stats=True, wall_start_ts=0.0, final_stage_id_for_e2e=1)
+    agg.on_stage_metrics(0, "r1", _stage_stats(stage_id=0, serving_time_to_first_output_ms=80.0))
+    agg.on_stage_metrics(1, "r1", _stage_stats(stage_id=1, serving_time_to_first_output_ms=418.0))
+    agg.on_finalize_request(1, "r1", req_start_ts=0.0)
+
+    summary = agg.build_and_log_summary()
+    rows = summary["stage_table"][0]["stages"]
+    assert [row["serving_time_to_first_output_ms"] for row in rows] == [80.0, 418.0]

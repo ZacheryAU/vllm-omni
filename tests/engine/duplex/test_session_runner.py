@@ -49,7 +49,7 @@ from vllm_omni.engine.duplex.messages import (
 from vllm_omni.engine.duplex.session.engine_session import RESPONSE_REQUEST_MEASUREMENT_ORIGIN
 from vllm_omni.engine.duplex.session.manager import DuplexSessionManager
 from vllm_omni.engine.duplex.session.runner import DuplexSessionRunner
-from vllm_omni.metrics.stats import StageRequestStats, StageStats
+from vllm_omni.metrics.stats import OrchestratorAggregator, StageRequestStats, StageStats
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex.plugin import MiniCPMO45DuplexPlugin
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
@@ -200,6 +200,7 @@ async def open_harness(
     runtime_config: DuplexSessionRuntimeConfig | None = None,
     stage_count: int = 2,
     clock: Any = None,
+    log_stats: bool = False,
 ) -> Harness:
     plugin = MiniCPMO45DuplexPlugin(_fake_encode_audio)
     port = RecordingStagePort(stage_count=stage_count)
@@ -212,6 +213,7 @@ async def open_harness(
         result_sink=results,
         runtime_config=runtime_config or DuplexSessionRuntimeConfig(),
         model_config=None,
+        log_stats=log_stats,
         clock=clock,
     )
     body: dict[str, object] = {"auto_response": auto_response, **(extra_body or {})}
@@ -1107,6 +1109,79 @@ async def test_stage0_metrics_from_several_units_are_summed_into_one_response() 
         assert stage_metrics["0"]["num_tokens_out"] == 7
     finally:
         await close_harness(h)
+
+
+@pytest.mark.asyncio
+async def test_response_done_logs_orchestrator_stage_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged: list[OrchestratorAggregator] = []
+
+    def _capture(self: OrchestratorAggregator) -> dict[str, object]:
+        logged.append(self)
+        return {}
+
+    monkeypatch.setattr(OrchestratorAggregator, "build_and_log_summary", _capture)
+    h = await open_harness(log_stats=True)
+    try:
+        assert h.session.log_stats is True
+        assert h.session.num_stages == 2
+        await h.run(append_audio())
+        request_id = h.stage0_request_id()
+        h.deliver(
+            SimpleNamespace(
+                request_id=request_id,
+                finished=False,
+                outputs=[SimpleNamespace(text="hi", token_ids=[11], multimodal_output={})],
+                multimodal_output={},
+            ),
+            stage_id=0,
+            metrics=stage_stats(stage_id=0, request_id=request_id, num_tokens_out=3),
+        )
+        assert await h.settle() == []
+
+        events = await h.deliver_and_settle(
+            tts_output(request_id, samples=24000, text="hi", turn_end=True),
+            metrics=stage_stats(stage_id=1, request_id=request_id, num_tokens_out=4),
+        )
+        done = find(events, "response.done")
+        assert done.status == "completed"
+        assert len(logged) == 1
+        aggregator = logged[0]
+        assert aggregator.num_stages == 2
+        stage_ids = [event.stage_id for event in aggregator.stage_events[done.response_id]]
+        assert stage_ids == [0, 1]
+        assert done.response_id in aggregator.e2e_done
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
+async def test_duplex_stage_request_stamps_wall_clock_request_timestamp() -> None:
+    """serving_time_to_first_output_ms is (first_output_ts - request_timestamp)*1000.
+
+    Duplex used to leave request_timestamp at 0, so the table printed unix_ts*1000.
+    """
+    from tests.engine.test_duplex_orchestrator import (
+        SESSION_ID as ORCH_SESSION_ID,
+    )
+    from tests.engine.test_duplex_orchestrator import (
+        _build,
+        _close,
+        _open,
+        _stage0_request_id,
+    )
+    from vllm_omni.engine.duplex_orchestrator import DuplexOrchestratorRequestState
+
+    orchestrator, _, rpc_q, _ = _build()
+    try:
+        result = await _open(orchestrator, rpc_q)
+        assert result.ok
+        state = orchestrator.request_states[_stage0_request_id()]
+        assert isinstance(state, DuplexOrchestratorRequestState)
+        assert state.request_timestamp > 1_000_000_000.0
+    finally:
+        if ORCH_SESSION_ID in orchestrator.session_manager.runners:
+            await _close(orchestrator, rpc_q)
+        await orchestrator.session_manager.shutdown()
 
 
 def _response_request_metrics_of(event: object) -> dict[str, object]:

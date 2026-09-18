@@ -398,8 +398,9 @@ class ModelChannel:
             raise TypeError("duplex plugin decide_output() must return DuplexOutputDecision or None")
         return decision
 
-    @staticmethod
-    def stage_metrics_snapshot(stage_id: int, metrics: object, output: object) -> dict[str, dict[str, object]] | None:
+    def stage_metrics_snapshot(
+        self, stage_id: int, metrics: object, output: object
+    ) -> dict[str, dict[str, object]] | None:
         if not isinstance(metrics, StageRequestStats):
             return None
         event = metrics
@@ -409,6 +410,7 @@ class ModelChannel:
             final_output_type = getattr(output, "final_output_type", None)
             if isinstance(final_output_type, str):
                 event = replace(event, final_output_type=final_output_type)
+        self._ctx.session.observe_stage_request_stats(stage_id, event)
         try:
             merged = OrchestratorAggregator._merge_stage_metric_event(None, event)
         except Exception:

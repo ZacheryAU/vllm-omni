@@ -48,6 +48,8 @@ from uuid import uuid4
 
 import pybase64 as base64
 
+from vllm_omni.metrics.definitions import stage_modality_flags
+
 __all__ = [
     "DUPLEX_FIRST_UNIT_MS",
     "DUPLEX_UNIT_MS",
@@ -88,6 +90,7 @@ __all__ = [
     "distribution_summary",
     "metric_mean",
     "summarize_session_request_metrics",
+    "summarize_stage_metrics",
     "wait_for_condition",
     "write_pcm16_wav",
 ]
@@ -1386,6 +1389,95 @@ def metric_mean(value: object) -> float | None:
     return None
 
 
+def _stage_id_sort_key(stage_id: str) -> tuple[int, int | str]:
+    try:
+        return (0, int(stage_id))
+    except ValueError:
+        return (1, stage_id)
+
+
+def _stage_type_labels(stage_metrics: Mapping[str, object]) -> dict[str, object]:
+    labels: dict[str, object] = {}
+    for key in ("final_output_type", "output_unit_type"):
+        value = stage_metrics.get(key)
+        if isinstance(value, str) and value:
+            labels[key] = value
+    return labels
+
+
+def _stage_ms_list(stage_metrics: Mapping[str, object], field_name: str) -> list[float]:
+    raw = stage_metrics.get(field_name)
+    return [float(value) for value in raw if isinstance(value, int | float)] if isinstance(raw, list) else []
+
+
+def _has_legacy_vllm_token_metrics(stage_metrics: Mapping[str, object]) -> bool:
+    if stage_metrics.get("vllm_ttft_ms") or stage_metrics.get("vllm_tpot_ms"):
+        return True
+    raw_itls = stage_metrics.get("vllm_itls_ms")
+    return isinstance(raw_itls, list) and bool(raw_itls)
+
+
+def _text_stage_engine_metrics_block(stage_metrics: Mapping[str, object]) -> dict[str, object]:
+    itls = _stage_ms_list(stage_metrics, "vllm_itls_ms")
+    return {
+        "source": "engine_stage_metrics",
+        **_stage_type_labels(stage_metrics),
+        "output_token_count": int(stage_metrics.get("num_tokens_out") or 0),
+        "ttft_ms": float(stage_metrics.get("vllm_ttft_ms") or 0.0),
+        "tpot_ms": float(stage_metrics.get("vllm_tpot_ms") or 0.0),
+        "itls_ms": itls,
+        "inter_token_interval_ms": _interval_summary(itls),
+    }
+
+
+def _audio_stage_engine_metrics_block(stage_metrics: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "source": "engine_stage_metrics",
+        **_stage_type_labels(stage_metrics),
+        "ttfp_ms": float(stage_metrics.get("serving_time_to_first_output_ms") or 0.0),
+        "output_unit_count": int(stage_metrics.get("output_unit_count") or 0),
+        "audio_generated_frames": int(stage_metrics.get("audio_generated_frames") or 0),
+        "audio_duration_s": float(stage_metrics.get("audio_duration_s") or 0.0),
+    }
+
+
+def _stream_stage_engine_metrics_block(stage_metrics: Mapping[str, object]) -> dict[str, object]:
+    icls = _stage_ms_list(stage_metrics, "inter_output_latencies_ms")
+    return {
+        "source": "engine_stage_metrics",
+        **_stage_type_labels(stage_metrics),
+        "output_unit_count": int(stage_metrics.get("output_unit_count") or 0),
+        "ttfc_ms": float(stage_metrics.get("serving_time_to_first_output_ms") or 0.0),
+        "tpop_ms": float(stage_metrics.get("time_per_output_unit_ms") or 0.0),
+        "icls_ms": icls,
+        "inter_chunk_interval_ms": _interval_summary(icls),
+    }
+
+
+def _stage_engine_metrics_block(stage_metrics: Mapping[str, object]) -> dict[str, object]:
+    flags = stage_modality_flags(
+        stage_metrics.get("final_output_type"),
+        stage_metrics.get("output_unit_type"),
+    )
+    if flags.is_text_stage or (
+        not flags.is_audio_stage
+        and not flags.is_internal_stream_stage
+        and not flags.is_image_stage
+        and not flags.is_video_stage
+        and _has_legacy_vllm_token_metrics(stage_metrics)
+    ):
+        return _text_stage_engine_metrics_block(stage_metrics)
+    if flags.is_audio_stage:
+        return _audio_stage_engine_metrics_block(stage_metrics)
+    if flags.is_internal_stream_stage:
+        return _stream_stage_engine_metrics_block(stage_metrics)
+    block: dict[str, object] = {"source": "engine_stage_metrics", **_stage_type_labels(stage_metrics)}
+    gen_time_ms = stage_metrics.get("stage_gen_time_ms")
+    if isinstance(gen_time_ms, int | float) and not isinstance(gen_time_ms, bool):
+        block["stage_gen_time_ms"] = float(gen_time_ms)
+    return block
+
+
 def _event_stage_metrics(event: dict[str, object]) -> dict[str, object] | None:
     candidates: list[object] = [event.get("vllm_omni")]
     metadata = event.get("metadata")
@@ -1615,7 +1707,7 @@ class EventCollector:
         measurement_origin: dict[str, str] | None = None,
     ) -> dict[str, object]:
         """Summarize engine token metrics and client-observed audio cadence."""
-        stage0_metrics: dict[str, object] | None = None
+        observed_stage_metrics: dict[str, dict[str, object]] = {}
         response_request_metrics: dict[str, object] = {}
         response_created_at_s: float | None = None
         first_text_received_at_s: float | None = None
@@ -1643,9 +1735,10 @@ class EventCollector:
                 first_text_received_at_s = received_at_s
 
             stage_metrics = _event_stage_metrics(event)
-            stage0 = stage_metrics.get("0") if isinstance(stage_metrics, dict) else None
-            if isinstance(stage0, dict):
-                stage0_metrics = stage0
+            if isinstance(stage_metrics, dict):
+                for stage_id, stage_snapshot in stage_metrics.items():
+                    if isinstance(stage_snapshot, dict):
+                        observed_stage_metrics[str(stage_id)] = stage_snapshot
 
             event_request_metrics = _event_response_request_metrics(event)
             if event_request_metrics is not None:
@@ -1663,21 +1756,18 @@ class EventCollector:
                 cumulative_audio_ms.append(max(0.0, float(duration_ms)))
 
         result: dict[str, object] = {}
-        if stage0_metrics is not None:
-            raw_itls = stage0_metrics.get("vllm_itls_ms")
-            itls = (
-                [float(value) for value in raw_itls if isinstance(value, int | float)]
-                if isinstance(raw_itls, list)
-                else []
-            )
-            result["stage0_tokens"] = {
-                "source": "engine_stage_metrics",
-                "output_token_count": int(stage0_metrics.get("num_tokens_out") or 0),
-                "ttft_ms": float(stage0_metrics.get("vllm_ttft_ms") or 0.0),
-                "tpot_ms": float(stage0_metrics.get("vllm_tpot_ms") or 0.0),
-                "itls_ms": itls,
-                "inter_token_interval_ms": _interval_summary(itls),
+        stage0_metrics = observed_stage_metrics.get("0")
+        if observed_stage_metrics:
+            stages = {
+                stage_id: _stage_engine_metrics_block(stage_snapshot)
+                for stage_id, stage_snapshot in sorted(
+                    observed_stage_metrics.items(),
+                    key=lambda item: _stage_id_sort_key(item[0]),
+                )
             }
+            result["stages"] = stages
+            if "0" in stages:
+                result["stage0_tokens"] = stages["0"]
 
         if audio_received_at_s:
             intervals_ms = [
@@ -1913,6 +2003,59 @@ async def wait_for_condition(
     raise TimeoutError(f"Timed out waiting for {label}")
 
 
+def _finite_metric_values(
+    rows: Sequence[Mapping[str, object]],
+    metric: str,
+    *,
+    positive: bool = False,
+) -> list[float]:
+    return [
+        float(row[metric])
+        for row in rows
+        if isinstance(row.get(metric), int | float)
+        and not isinstance(row.get(metric), bool)
+        and math.isfinite(float(row[metric]))
+        and (not positive or float(row[metric]) > 0)
+    ]
+
+
+def summarize_stage_metrics(
+    request_metrics: Sequence[Mapping[str, object]],
+) -> dict[str, dict[str, object]] | None:
+    """Roll per-response engine stage blocks into ``{count, mean, p50, p99}``.
+
+    Reads ``stages`` when present, otherwise ``stage0_tokens`` as stage ``"0"``.
+    Zero or missing ``tpot_ms`` / ``tpop_ms`` values are omitted, matching
+    session ``tpot_ms``.
+    """
+    buckets: dict[str, list[Mapping[str, object]]] = {}
+    for request in request_metrics:
+        stages = request.get("stages")
+        if not isinstance(stages, dict):
+            stage0 = request.get("stage0_tokens")
+            stages = {"0": stage0} if isinstance(stage0, dict) else {}
+        for stage_id, stage_snapshot in stages.items():
+            if isinstance(stage_snapshot, dict):
+                buckets.setdefault(str(stage_id), []).append(stage_snapshot)
+    summary: dict[str, dict[str, object]] = {}
+    for stage_id in sorted(buckets, key=_stage_id_sort_key):
+        rows = buckets[stage_id]
+        stage_summary: dict[str, object] = {}
+        for metric, positive in (
+            ("ttft_ms", False),
+            ("tpot_ms", True),
+            ("ttfc_ms", False),
+            ("tpop_ms", True),
+            ("ttfp_ms", False),
+        ):
+            rolled = distribution_summary(_finite_metric_values(rows, metric, positive=positive))
+            if rolled is not None:
+                stage_summary[metric] = rolled
+        if stage_summary:
+            summary[stage_id] = stage_summary
+    return summary or None
+
+
 def summarize_session_request_metrics(
     request_metrics: list[dict[str, object]],
     *,
@@ -1929,26 +2072,17 @@ def summarize_session_request_metrics(
 
     Aggregatable fields are nested as ``{count, mean, p50, p99}``.
     """
-
-    def values(metric: str, *, positive: bool = False) -> list[float]:
-        return [
-            float(request[metric])
-            for request in request_metrics
-            if isinstance(request.get(metric), int | float)
-            and not isinstance(request.get(metric), bool)
-            and math.isfinite(float(request[metric]))
-            and (not positive or float(request[metric]) > 0)
-        ]
-
     summary: dict[str, object] = {
         "session_id": session_id,
         "audio_turn_count": len(request_metrics),
-        "ttft_ms": distribution_summary(values("ttft_ms")),
-        "ttfp_ms": distribution_summary(values("ttfp_ms")),
-        "rtf": distribution_summary(values("rtf"), digits=6),
+        "ttft_ms": distribution_summary(_finite_metric_values(request_metrics, "ttft_ms")),
+        "ttfp_ms": distribution_summary(_finite_metric_values(request_metrics, "ttfp_ms")),
+        "rtf": distribution_summary(_finite_metric_values(request_metrics, "rtf"), digits=6),
     }
-    if (tpot := distribution_summary(values("tpot_ms", positive=True))) is not None:
+    if (tpot := distribution_summary(_finite_metric_values(request_metrics, "tpot_ms", positive=True))) is not None:
         summary["tpot_ms"] = tpot
+    if (stages := summarize_stage_metrics(request_metrics)) is not None:
+        summary["stages"] = stages
     return summary
 
 
