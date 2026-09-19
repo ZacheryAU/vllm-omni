@@ -602,6 +602,28 @@ def test_early_missing_score_and_unparsed_flag() -> None:
     assert unparsed.parse_source == "llm_parse_failed"
 
 
+@pytest.mark.parametrize("score_literal", ['"NaN"', '"Infinity"', '"-Infinity"', "NaN", "Infinity", "-Infinity"])
+def test_nonfinite_json_scores_are_parse_failures(score_literal: str) -> None:
+    slot = {"question_text": "q", "gt_answer": "a"}
+    early = _GeneratedJudge([f'{{"flag":"Neutral","score":{score_literal},"rationale":"bad"}}']).judge_early(
+        slot, "ctx", "hi"
+    )
+    core = _GeneratedJudge(
+        [f'{{"score":{score_literal},"trigger_phrase":"answer","spoiler":false,"rationale":"bad"}}']
+    ).judge_core(slot, "ctx", "answer", "(none)")
+    partial = _GeneratedJudge(
+        [f'{{"score":{score_literal},"hallucination":false,"rationale":"bad"}}']
+    ).judge_interrupted_partial(slot, "answer")
+
+    assert early.score == 0.0
+    assert early.parse_source == "llm_parse_failed"
+    assert core.score == 0.0
+    assert core.parse_source == "llm_parse_failed"
+    assert core.trigger_phrase == ""
+    assert partial.score == 0.0
+    assert partial.parse_source == "llm_parse_failed"
+
+
 def test_fingerprint_requires_evaluator_schema_version() -> None:
     from vllm_omni.benchmarks.omniinteract_eval import EvaluationInputsFingerprint
 

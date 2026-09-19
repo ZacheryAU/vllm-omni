@@ -250,6 +250,7 @@ _OMNIINTERACT_AGGREGATE_MIN_IA_QTF1 = "omniinteract_aggregate_min_ia_qtf1"
 _OMNIINTERACT_AGGREGATE_SUBSETS = "omniinteract_aggregate_subsets"
 _OMNIINTERACT_AGGREGATE_GROUP = "omniinteract_aggregate_group"
 _OMNIINTERACT_AGGREGATE_COUNTS: dict[tuple[str, str], tuple[float, float, float]] = {}
+_OMNIINTERACT_MIN_EVALUATED_CASES = 1
 
 
 def _reset_omniinteract_aggregate_counts() -> None:
@@ -260,6 +261,24 @@ def _ia_qtf1_from_counts(tp: float, fp: float, fn: float) -> float:
     precision = tp / (tp + fp) if tp + fp > 0 else 0.0
     recall = tp / (tp + fn) if tp + fn > 0 else 0.0
     return (2.0 * precision * recall / (precision + recall)) if precision + recall > 0 else 0.0
+
+
+def _assert_subset_evaluated(accuracy: dict[str, object]) -> None:
+    """Reject a subset whose clipped or cancelled cases left nothing to score.
+
+    Individual ineligible cases may be skipped. A subset with fewer than
+    ``_OMNIINTERACT_MIN_EVALUATED_CASES`` evaluated cases must not pass, or its
+    zero TP/FP/FN would be pooled as a successful accuracy result.
+    """
+
+    evaluated = accuracy.get("evaluated")
+    if not isinstance(evaluated, int) or isinstance(evaluated, bool):
+        raise AssertionError("OmniInteract accuracy evaluated count is missing")
+    if evaluated < _OMNIINTERACT_MIN_EVALUATED_CASES:
+        raise AssertionError(
+            f"OmniInteract subset evaluated {evaluated} cases (skipped={accuracy.get('skipped')}); "
+            f"at least {_OMNIINTERACT_MIN_EVALUATED_CASES} evaluated case is required"
+        )
 
 
 def _finite_accuracy_count(value: object, name: str) -> float:
@@ -353,6 +372,7 @@ def assert_result(result, params, num_prompt) -> None:
             assert isinstance(accuracy, dict), "OmniInteract accuracy is missing"
             assert accuracy.get("status") == "ok", "OmniInteract accuracy did not complete"
             assert accuracy.get("failed") == 0, "OmniInteract accuracy reported failed cases"
+            _assert_subset_evaluated(accuracy)
             acc_summary = accuracy.get("summary")
             assert isinstance(acc_summary, dict), "OmniInteract accuracy summary is missing"
             ia_qtf1 = acc_summary.get("IA_QTF1")

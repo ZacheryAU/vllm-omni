@@ -15,6 +15,7 @@ are protocol-compatible rather than official paper-table numbers.
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from collections.abc import Mapping
@@ -167,8 +168,28 @@ class PartialJudgment:
     parse_source: str
 
 
-def _clamp(value: float) -> float:
+def _clamp_unit_interval(value: float) -> float:
     return max(0.0, min(1.0, value))
+
+
+def _json_unit_score(value: object) -> tuple[float | None, bool]:
+    """Parse one JSON score into a finite unit-interval value.
+
+    The second flag is true when the value is a non-finite float (NaN or
+    infinity). Callers must treat that as a parse failure and award no credit.
+    A value that is not a float returns ``(None, False)`` so existing
+    fallbacks stay available.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return None, False
+    try:
+        parsed = float(value)
+    except ValueError:
+        return None, False
+    if not math.isfinite(parsed):
+        return None, True
+    return _clamp_unit_interval(parsed), False
 
 
 def _text(value: object) -> str:
@@ -332,12 +353,20 @@ class OmniInteractJudge:
                 parse_source="llm_json" if parsed else "llm_parse_failed",
             )
         if "neutral" in normalized:
-            score = 0.0
             if parsed is not None and "score" in parsed:
-                try:
-                    score = _clamp(float(parsed["score"]))
-                except (TypeError, ValueError):
+                score, non_finite = _json_unit_score(parsed["score"])
+                if non_finite:
+                    return EarlyJudgment(
+                        category="unparsed",
+                        score=0.0,
+                        rationale=_text(parsed.get("rationale")),
+                        raw=raw,
+                        parse_source="llm_parse_failed",
+                    )
+                if score is None:
                     score = 0.0
+            else:
+                score = 0.0
             return EarlyJudgment(
                 category="neutral",
                 score=score,
@@ -378,11 +407,18 @@ class OmniInteractJudge:
         )
         parsed = _first_json_object(raw)
         score: float | None = None
+        non_finite = False
         if parsed is not None:
-            try:
-                score = _clamp(float(parsed.get("score", 0.0)))
-            except (TypeError, ValueError):
-                score = None
+            score, non_finite = _json_unit_score(parsed.get("score", 0.0))
+        if non_finite:
+            return CoreJudgment(
+                score=0.0,
+                trigger_phrase="",
+                spoiler=False,
+                rationale=_text(parsed.get("rationale")) if parsed else "",
+                raw=raw,
+                parse_source="llm_parse_failed",
+            )
         fallback = _score_float_from_text(raw) if score is None else None
         return CoreJudgment(
             score=score if score is not None else fallback if fallback is not None else 0.0,
@@ -411,14 +447,35 @@ class OmniInteractJudge:
             ),
         )
         parsed = _first_json_object(raw)
-        try:
-            score = _clamp(float(parsed.get("score", 0.0))) if parsed else 0.0
-        except (TypeError, ValueError):
-            score = 0.0
+        if parsed is None:
+            return PartialJudgment(
+                score=0.0,
+                hallucination=False,
+                rationale="",
+                raw=raw,
+                parse_source="llm_parse_failed",
+            )
+        score, non_finite = _json_unit_score(parsed.get("score", 0.0))
+        if non_finite:
+            return PartialJudgment(
+                score=0.0,
+                hallucination=False,
+                rationale=_text(parsed.get("rationale")),
+                raw=raw,
+                parse_source="llm_parse_failed",
+            )
+        if score is None:
+            return PartialJudgment(
+                score=0.0,
+                hallucination=_bool(parsed.get("hallucination")),
+                rationale=_text(parsed.get("rationale")),
+                raw=raw,
+                parse_source="llm_json",
+            )
         return PartialJudgment(
             score=score,
-            hallucination=_bool(parsed.get("hallucination")) if parsed else False,
-            rationale=_text(parsed.get("rationale")) if parsed else "",
+            hallucination=_bool(parsed.get("hallucination")),
+            rationale=_text(parsed.get("rationale")),
             raw=raw,
-            parse_source="llm_json" if parsed else "llm_parse_failed",
+            parse_source="llm_json",
         )

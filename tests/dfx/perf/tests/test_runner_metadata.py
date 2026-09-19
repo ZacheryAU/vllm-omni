@@ -563,7 +563,12 @@ def test_omniinteract_result_accepts_accuracy_at_floor():
                 "success": 4,
                 "failed": 0,
                 "artifacts_complete": True,
-                "accuracy": {"status": "ok", "failed": 0, "summary": {"IA_QTF1": 0.25}},
+                "accuracy": {
+                    "status": "ok",
+                    "failed": 0,
+                    "evaluated": 4,
+                    "summary": {"IA_QTF1": 0.25},
+                },
             },
         },
         {"dataset_name": "omniinteract", "omniinteract_evaluate": True, "omniinteract_min_ia_qtf1": 0.2},
@@ -617,7 +622,12 @@ def test_omniinteract_result_rejects_ia_qtf1_below_floor():
                     "success": 4,
                     "failed": 0,
                     "artifacts_complete": True,
-                    "accuracy": {"status": "ok", "failed": 0, "summary": {"IA_QTF1": 0.1}},
+                    "accuracy": {
+                        "status": "ok",
+                        "failed": 0,
+                        "evaluated": 4,
+                        "summary": {"IA_QTF1": 0.1},
+                    },
                 },
             },
             {"dataset_name": "omniinteract", "omniinteract_evaluate": True, "omniinteract_min_ia_qtf1": 0.2},
@@ -625,7 +635,15 @@ def test_omniinteract_result_rejects_ia_qtf1_below_floor():
         )
 
 
-def _omniinteract_accuracy_result(*, tp: float, fp: float, fn: float, ia_qtf1: float = 0.5) -> dict[str, object]:
+def _omniinteract_accuracy_result(
+    *,
+    tp: float,
+    fp: float,
+    fn: float,
+    ia_qtf1: float = 0.5,
+    evaluated: int = 4,
+    skipped: int = 0,
+) -> dict[str, object]:
     return {
         "completed": 4,
         "omniinteract": {
@@ -636,6 +654,9 @@ def _omniinteract_accuracy_result(*, tp: float, fp: float, fn: float, ia_qtf1: f
             "accuracy": {
                 "status": "ok",
                 "failed": 0,
+                "evaluated": evaluated,
+                "skipped": skipped,
+                "total": 4,
                 "summary": {"IA_QTF1": ia_qtf1, "Global_TP": tp, "Global_FP": fp, "Global_FN": fn},
             },
         },
@@ -708,6 +729,23 @@ def test_omniinteract_aggregate_rejects_pooled_ia_qtf1_below_floor():
         assert_result(
             _omniinteract_accuracy_result(tp=0.0, fp=1, fn=1, ia_qtf1=0.0),
             _omniinteract_aggregate_params("1qna", group="fail"),
+            4,
+        )
+
+
+def test_omniinteract_aggregate_rejects_entirely_skipped_subset():
+    from tests.dfx.perf.scripts.run_benchmark import _reset_omniinteract_aggregate_counts, assert_result
+
+    _reset_omniinteract_aggregate_counts()
+    assert_result(
+        _omniinteract_accuracy_result(tp=4.0, fp=0.0, fn=0.0, ia_qtf1=1.0),
+        _omniinteract_aggregate_params("1q1a", group="skipped-subset"),
+        4,
+    )
+    with pytest.raises(AssertionError, match="evaluated 0 cases"):
+        assert_result(
+            _omniinteract_accuracy_result(tp=0.0, fp=0.0, fn=0.0, ia_qtf1=1.0, evaluated=0, skipped=4),
+            _omniinteract_aggregate_params("1q1a_math", group="skipped-subset"),
             4,
         )
 
