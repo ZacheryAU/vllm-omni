@@ -1345,6 +1345,39 @@ def test_event_collector_reports_all_engine_stages():
     assert timing["stages"]["2"]["ttfp_ms"] == 80.0
 
 
+def test_audio_stage_omits_missing_or_zero_ttfp():
+    def _audio_stage_timing(serving_time: object) -> dict[str, object]:
+        collector = EventCollector()
+        collector.add({"type": "response.created", "response": {"id": "resp-a"}}, received_at_s=10.0)
+        stage_2: dict[str, object] = {
+            "final_output_type": "audio",
+            "output_unit_type": "audio",
+            "output_unit_count": 1,
+            "audio_generated_frames": 1,
+            "audio_duration_s": 0.08,
+        }
+        if serving_time is not None:
+            stage_2["serving_time_to_first_output_ms"] = serving_time
+        collector.add(
+            {
+                "type": "response.output_audio.delta",
+                "response_id": "resp-a",
+                "delta": base64.b64encode(b"audio").decode("ascii"),
+                "sample_rate_hz": 16_000,
+                "metadata": {
+                    "audio_duration_ms": 80,
+                    "vllm_omni": {"stage_metrics": {"2": stage_2}},
+                },
+            },
+            received_at_s=10.2,
+        )
+        return collector.timing_summary(after_s=10.0, response_id="resp-a")["stages"]["2"]
+
+    assert "ttfp_ms" not in _audio_stage_timing(None)
+    assert "ttfp_ms" not in _audio_stage_timing(0.0)
+    assert _audio_stage_timing(80.0)["ttfp_ms"] == 80.0
+
+
 def test_summarize_session_request_metrics_groups_stages():
     summary = summarize_session_request_metrics(
         [

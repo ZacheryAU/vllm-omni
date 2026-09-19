@@ -8,7 +8,6 @@ Consumed by:
 - vllm_omni.metrics.modality (audio families)
 - vllm_omni.metrics.transfer (cross-stage transfer families)
 - vllm_omni.benchmarks.metrics.metrics (bench CLI MultiModalsBenchmarkMetrics)
-- vllm_omni.clients.duplex (per-stage JSON field names)
 
 Naming conventions for the ``vllm_omni:*`` families exposed here:
 time-bearing metrics use the ``_s`` suffix (values in seconds), counters use
@@ -345,7 +344,7 @@ STREAMING_OUTPUT_UNIT_TYPES = frozenset({"text", "stream", "audio"})
 
 
 class StageModalityFlags(NamedTuple):
-    """How ``--print-stage`` and duplex JSON classify one engine stage."""
+    """How ``--print-stage`` classifies one engine stage."""
 
     is_text_stage: bool
     is_audio_stage: bool
