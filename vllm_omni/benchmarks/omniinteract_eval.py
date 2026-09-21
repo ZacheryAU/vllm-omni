@@ -35,7 +35,7 @@ HARD = "Hard"
 SOFT = "Soft"
 PROTOCOL_SOURCE = "Lucky-Lance/OmniInteract@de304cef35fd9a50a5caadb5090c34cfbf0dd868"
 # Bump when slot scoring, judge prompts, or cached slot schema change.
-EVALUATOR_SCHEMA_VERSION = 1
+EVALUATOR_SCHEMA_VERSION = 2
 _HASH_CHUNK_BYTES = 65536
 _TRANSCRIPT_NAME = "wav_transcript.json"
 _PARSE_WARN_FRACTION = 0.1
@@ -917,6 +917,21 @@ def _judge_parse_summary(rows: list[dict[str, object]]) -> dict[str, object]:
     return {**counts, "judge_calls": total, "non_json_calls": non_json}
 
 
+def _slot_rows_have_judge_parse_failure(rows: list[dict[str, object]]) -> bool:
+    """True when any scored stage recorded ``llm_parse_failed``.
+
+    Missing or invalid judge ``score`` fields are labeled this way; such samples
+    must not be cached as ``status="ok"`` for ``--omniinteract-eval-skip-existing``.
+    """
+
+    for row in rows:
+        for key in ("stage_early", "stage_core", "interruption_diagnostic"):
+            stage = row.get(key)
+            if isinstance(stage, dict) and _text(stage.get("parse_source")) == "llm_parse_failed":
+                return True
+    return False
+
+
 def _trigger_fallback_count(rows: list[dict[str, object]]) -> int:
     return sum(
         1 for row in rows if isinstance(row.get("stage_core"), dict) and bool(row["stage_core"].get("trigger_fallback"))
@@ -1198,7 +1213,7 @@ def evaluate_case(
         judge_max_tokens=int(getattr(judge, "max_tokens", 0) or 0),
     )
     evaluation = {
-        "status": "ok",
+        "status": "parse_failed" if _slot_rows_have_judge_parse_failure(slot_rows) else "ok",
         "sample_id": sample_id,
         "subset": case.subset,
         "scene_type": scene_type,
@@ -1403,7 +1418,17 @@ def evaluate_batch(
         for future in as_completed(futures):
             case, destination = futures[future]
             try:
-                item_rows.append(future.result())
+                item = future.result()
+                if item.get("status") == "ok":
+                    item_rows.append(item)
+                else:
+                    failures.append(
+                        {
+                            "sample_id": item.get("sample_id") or destination.name.removesuffix(".unified_eval.json"),
+                            "status": item.get("status") or "parse_failed",
+                            "error": "judge score parse failure",
+                        }
+                    )
             except (JudgeRequestError, OSError, ValueError) as exc:
                 failures.append(
                     {

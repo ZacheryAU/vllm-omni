@@ -192,6 +192,23 @@ def _json_unit_score(value: object) -> tuple[float | None, bool]:
     return _clamp_unit_interval(parsed), False
 
 
+def _required_json_unit_score(parsed: Mapping[str, object]) -> tuple[float | None, bool]:
+    """Require an explicit finite ``score`` field on a parsed JSON object.
+
+    Returns ``(score, False)`` for a present, finite unit-interval value
+    (including an explicit ``0`` / ``0.0``). Returns ``(None, True)`` when
+    ``score`` is missing, has an invalid type, or is non-finite — callers must
+    treat that as ``llm_parse_failed`` and must not invent a valid zero.
+    """
+
+    if "score" not in parsed:
+        return None, True
+    score, non_finite = _json_unit_score(parsed["score"])
+    if non_finite or score is None:
+        return None, True
+    return score, False
+
+
 def _text(value: object) -> str:
     return str(value or "").strip()
 
@@ -353,26 +370,29 @@ class OmniInteractJudge:
                 parse_source="llm_json" if parsed else "llm_parse_failed",
             )
         if "neutral" in normalized:
-            if parsed is not None and "score" in parsed:
-                score, non_finite = _json_unit_score(parsed["score"])
-                if non_finite:
-                    return EarlyJudgment(
-                        category="unparsed",
-                        score=0.0,
-                        rationale=_text(parsed.get("rationale")),
-                        raw=raw,
-                        parse_source="llm_parse_failed",
-                    )
-                if score is None:
-                    score = 0.0
-            else:
-                score = 0.0
+            if parsed is None:
+                return EarlyJudgment(
+                    category="neutral",
+                    score=0.0,
+                    rationale="",
+                    raw=raw,
+                    parse_source="llm_parse_failed",
+                )
+            score, score_failed = _required_json_unit_score(parsed)
+            if score_failed:
+                return EarlyJudgment(
+                    category="unparsed",
+                    score=0.0,
+                    rationale=_text(parsed.get("rationale")),
+                    raw=raw,
+                    parse_source="llm_parse_failed",
+                )
             return EarlyJudgment(
                 category="neutral",
-                score=score,
-                rationale=_text(parsed.get("rationale")) if parsed else "",
+                score=score if score is not None else 0.0,
+                rationale=_text(parsed.get("rationale")),
                 raw=raw,
-                parse_source="llm_json" if parsed else "llm_parse_failed",
+                parse_source="llm_json",
             )
         return EarlyJudgment(
             category="unparsed",
@@ -407,10 +427,10 @@ class OmniInteractJudge:
         )
         parsed = _first_json_object(raw)
         score: float | None = None
-        non_finite = False
-        if parsed is not None:
-            score, non_finite = _json_unit_score(parsed.get("score", 0.0))
-        if non_finite:
+        json_score_failed = False
+        if parsed is not None and "score" in parsed:
+            score, json_score_failed = _required_json_unit_score(parsed)
+        if json_score_failed:
             return CoreJudgment(
                 score=0.0,
                 trigger_phrase="",
@@ -419,6 +439,7 @@ class OmniInteractJudge:
                 raw=raw,
                 parse_source="llm_parse_failed",
             )
+        # Missing JSON ``score`` may still recover via anchored float text.
         fallback = _score_float_from_text(raw) if score is None else None
         return CoreJudgment(
             score=score if score is not None else fallback if fallback is not None else 0.0,
@@ -455,8 +476,8 @@ class OmniInteractJudge:
                 raw=raw,
                 parse_source="llm_parse_failed",
             )
-        score, non_finite = _json_unit_score(parsed.get("score", 0.0))
-        if non_finite:
+        score, score_failed = _required_json_unit_score(parsed)
+        if score_failed:
             return PartialJudgment(
                 score=0.0,
                 hallucination=False,
@@ -464,16 +485,8 @@ class OmniInteractJudge:
                 raw=raw,
                 parse_source="llm_parse_failed",
             )
-        if score is None:
-            return PartialJudgment(
-                score=0.0,
-                hallucination=_bool(parsed.get("hallucination")),
-                rationale=_text(parsed.get("rationale")),
-                raw=raw,
-                parse_source="llm_json",
-            )
         return PartialJudgment(
-            score=score,
+            score=score if score is not None else 0.0,
             hallucination=_bool(parsed.get("hallucination")),
             rationale=_text(parsed.get("rationale")),
             raw=raw,

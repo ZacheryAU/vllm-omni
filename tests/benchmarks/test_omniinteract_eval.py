@@ -320,6 +320,81 @@ def test_skip_existing_rejects_stale_transcript(tmp_path: Path, monkeypatch: pyt
     assert fresh["summary"]["IA_QTF1"] == pytest.approx(0.0)
 
 
+class _MissingCoreScoreJudge(_ConfiguredFixedJudge):
+    def judge_core(
+        self,
+        slot: dict[str, object],
+        full_context: str,
+        actual_text: str,
+        future_answers: str,
+    ) -> CoreJudgment:
+        del slot, full_context, actual_text, future_answers
+        return CoreJudgment(0.0, "", False, "Could not evaluate", "{}", "llm_parse_failed")
+
+
+def test_evaluate_batch_reports_missing_score_as_parse_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import vllm_omni.benchmarks.omniinteract_eval as eval_mod
+
+    case, result = _realtime_eval_case(tmp_path, transcript_text="answer")
+    options = _eval_options(tmp_path, skip_existing=False)
+    monkeypatch.setattr(eval_mod, "OmniInteractJudge", _MissingCoreScoreJudge)
+    evaluation = evaluate_batch([case], [result], options)
+    assert evaluation["status"] == "failed"
+    assert evaluation["evaluated"] == 0
+    assert evaluation["failed"] == 1
+    sample_id = f"{case.subset}__{Path(result.output_dir).name}"
+    cached = json.loads((options.output_dir / f"{sample_id}.unified_eval.json").read_text())
+    assert cached["status"] == "parse_failed"
+
+
+def test_skip_existing_rejects_parse_failed_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import vllm_omni.benchmarks.omniinteract_eval as eval_mod
+
+    case, result = _realtime_eval_case(tmp_path, transcript_text="answer")
+    options = _eval_options(tmp_path, skip_existing=True)
+    fingerprint = evaluation_inputs_fingerprint(
+        annotation_path=case.annotation_path,
+        transcript_path=Path(result.output_dir) / "wav_transcript.json",
+        judge_model=options.judge_model,
+        judge_base_url=options.judge_base_url,
+        judge_max_tokens=options.judge_max_tokens,
+    )
+    sample_id = f"{case.subset}__{Path(result.output_dir).name}"
+    cache_path = options.output_dir / f"{sample_id}.unified_eval.json"
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_text(
+        json.dumps(
+            {
+                "status": "parse_failed",
+                "sample_id": sample_id,
+                "inputs_fingerprint": asdict(fingerprint),
+                "summary": {
+                    "IA_QTF1": 0.0,
+                    "num_slots": 1,
+                    "num_unmatched_chunks": 0,
+                    "Global_TP": 0,
+                    "Global_FP": 0,
+                    "Global_FN": 1,
+                },
+                "slots": [
+                    {
+                        "stage_core": {"parse_source": "llm_parse_failed", "S_core": 0.0},
+                        "TP_n": 0.0,
+                        "FP_delta": 0,
+                        "FN_delta": 1,
+                    }
+                ],
+            }
+        )
+    )
+    monkeypatch.setattr(eval_mod, "OmniInteractJudge", _ConfiguredFixedJudge)
+    fresh = evaluate_batch([case], [result], options)
+    assert fresh["evaluated"] == 1
+    assert fresh["failed"] == 0
+    assert fresh["summary"]["IA_QTF1"] == pytest.approx(1.0)
+    assert json.loads(cache_path.read_text())["status"] == "ok"
+
+
 def _slot_row(
     *,
     scene_type: str,
@@ -591,15 +666,57 @@ def test_core_score_float_ignores_leading_counts() -> None:
 def test_early_missing_score_and_unparsed_flag() -> None:
     missing_score = _GeneratedJudge(['{"flag":"Neutral","rationale":"ok"}'])
     early = missing_score.judge_early({"question_text": "q", "gt_answer": "a"}, "ctx", "hi")
-    assert early.category == "neutral"
+    assert early.category == "unparsed"
     assert early.score == 0.0
-    assert early.parse_source == "llm_json"
+    assert early.parse_source == "llm_parse_failed"
 
     garbage = _GeneratedJudge(["not json and not a known flag"])
     unparsed = garbage.judge_early({"question_text": "q", "gt_answer": "a"}, "ctx", "hi")
     assert unparsed.category == "unparsed"
     assert unparsed.score == 0.0
     assert unparsed.parse_source == "llm_parse_failed"
+
+
+@pytest.mark.parametrize(
+    ("path", "response"),
+    [
+        ("early", '{"flag":"Neutral","rationale":"Could not evaluate this answer"}'),
+        ("early", '{"flag":"Neutral","score":"invalid","rationale":"bad"}'),
+        ("core", '{"rationale":"Could not evaluate this answer"}'),
+        ("core", '{"score":"invalid","trigger_phrase":"","spoiler":false,"rationale":"bad"}'),
+        ("partial", '{"rationale":"Could not evaluate this answer"}'),
+        ("partial", '{"score":"invalid","hallucination":false,"rationale":"bad"}'),
+    ],
+)
+def test_missing_or_invalid_json_scores_are_parse_failures(path: str, response: str) -> None:
+    slot = {"question_text": "q", "gt_answer": "a"}
+    judge = _GeneratedJudge([response])
+    if path == "early":
+        judgment = judge.judge_early(slot, "ctx", "hi")
+    elif path == "core":
+        judgment = judge.judge_core(slot, "ctx", "answer", "(none)")
+    else:
+        judgment = judge.judge_interrupted_partial(slot, "answer")
+    assert judgment.score == 0.0
+    assert judgment.parse_source == "llm_parse_failed"
+
+
+def test_explicit_zero_json_score_is_valid_llm_json() -> None:
+    slot = {"question_text": "q", "gt_answer": "a"}
+    early = _GeneratedJudge(['{"flag":"Neutral","score":0,"rationale":"zero"}']).judge_early(slot, "ctx", "hi")
+    core = _GeneratedJudge(['{"score":0.0,"trigger_phrase":"","spoiler":false,"rationale":"zero"}']).judge_core(
+        slot, "ctx", "answer", "(none)"
+    )
+    partial = _GeneratedJudge(['{"score":0,"hallucination":false,"rationale":"zero"}']).judge_interrupted_partial(
+        slot, "answer"
+    )
+    assert early.category == "neutral"
+    assert early.score == 0.0
+    assert early.parse_source == "llm_json"
+    assert core.score == 0.0
+    assert core.parse_source == "llm_json"
+    assert partial.score == 0.0
+    assert partial.parse_source == "llm_json"
 
 
 @pytest.mark.parametrize("score_literal", ['"NaN"', '"Infinity"', '"-Infinity"', "NaN", "Infinity", "-Infinity"])
