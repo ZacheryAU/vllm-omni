@@ -84,6 +84,7 @@ __all__ = [
     "ResponseHandle",
     "SessionConfig",
     "SessionCreated",
+    "SessionUpdated",
     "SpeakDecision",
     "WebSocketTransport",
     "TextDelta",
@@ -389,6 +390,15 @@ class SessionResumed(SessionCreated):
     pass
 
 
+class SessionUpdated(DuplexEvent):
+    """An acknowledged replacement of the public session configuration."""
+
+    @property
+    def session(self) -> dict[str, object]:
+        value = self.raw.get("session")
+        return value if isinstance(value, dict) else {}
+
+
 class SessionClosed(DuplexEvent):
     pass
 
@@ -469,6 +479,7 @@ class ErrorEvent(DuplexEvent):
 _EVENT_TYPES: dict[str, type[DuplexEvent]] = {
     "session.created": SessionCreated,
     "session.resumed": SessionResumed,
+    "session.updated": SessionUpdated,
     "session.closed": SessionClosed,
     "session.expired": SessionExpired,
     "response.created": ResponseCreated,
@@ -1024,6 +1035,9 @@ class DuplexClientBase(ABC):
             self._adopt_session(event)
         elif isinstance(event, SessionCreated):
             self._adopt_session(event)
+        elif isinstance(event, SessionUpdated):
+            if event.session:
+                self.session_info = event.session
         elif isinstance(event, ResponseCreated):
             response_id = event.response_id
             if response_id and response_id not in self._responses:
