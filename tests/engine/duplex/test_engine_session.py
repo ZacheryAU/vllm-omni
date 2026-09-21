@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -40,13 +42,17 @@ def _session(
     *,
     num_stages: int = 1,
     log_stats: bool = False,
+    clock: Callable[[], float] | None = None,
 ) -> DuplexEngineSession:
-    return DuplexEngineSession(
+    session = DuplexEngineSession(
         session_id=session_id,
         config=config or DuplexSessionConfig(model="test-model"),
         num_stages=num_stages,
         log_stats=log_stats,
     )
+    if clock is not None:
+        session._clock = clock
+    return session
 
 
 def _stage_stats(
@@ -55,6 +61,7 @@ def _stage_stats(
     request_id: str = "stage-req",
     num_tokens_out: int = 3,
     vllm_ttft_ms: float = 12.0,
+    vllm_tpot_ms: float = 0.0,
     serving_time_to_first_output_ms: float = 0.0,
 ) -> StageRequestStats:
     return StageRequestStats(
@@ -71,6 +78,7 @@ def _stage_stats(
         request_id=request_id,
         final_output_type="text",
         vllm_ttft_ms=vllm_ttft_ms,
+        vllm_tpot_ms=vllm_tpot_ms,
         serving_time_to_first_output_ms=serving_time_to_first_output_ms,
     )
 
@@ -907,3 +915,42 @@ def test_http_stage_table_keeps_serving_time_to_first_output() -> None:
     summary = agg.build_and_log_summary()
     rows = summary["stage_table"][0]["stages"]
     assert [row["serving_time_to_first_output_ms"] for row in rows] == [80.0, 418.0]
+
+
+def test_logged_e2e_includes_wait_before_first_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    mono = {"t": 100.0}
+    wall = {"t": 1_000.0}
+    monkeypatch.setattr(time, "time", lambda: wall["t"])
+    logged: list[OrchestratorAggregator] = []
+    monkeypatch.setattr(OrchestratorAggregator, "build_and_log_summary", lambda self: logged.append(self) or {})
+    session = _session(log_stats=True, clock=lambda: mono["t"])
+    session.mark_model_turn_request_started(0, 100.0)
+
+    mono["t"] = 102.0
+    wall["t"] = 1_002.0
+    response_id = session.begin_response(turn_id=0)
+    first = session.mark_response_first_outputs(observed_at_s=102.0, has_text=True, has_audio=True)
+    assert first["ttft_ms"] == pytest.approx(2000.0)
+
+    mono["t"] = 102.1
+    wall["t"] = 1_002.1
+    session.end_response()
+
+    assert logged[0].e2e_events[0].request_id == response_id
+    assert logged[0].e2e_events[0].e2e_total_ms == pytest.approx(2100.0)
+
+
+def test_logged_tpot_matches_client_weighted_aggregation(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged: list[OrchestratorAggregator] = []
+    monkeypatch.setattr(OrchestratorAggregator, "build_and_log_summary", lambda self: logged.append(self) or {})
+    session = _session(log_stats=True)
+    response_id = session.begin_response()
+    session.observe_stage_request_stats(0, _stage_stats(stage_id=0, num_tokens_out=11, vllm_tpot_ms=10.0))
+    session.observe_stage_request_stats(0, _stage_stats(stage_id=0, num_tokens_out=3, vllm_tpot_ms=100.0))
+    session.accumulate_response_stage_metrics({"0": {"num_tokens_out": 11, "vllm_tpot_ms": 10.0}})
+    client = session.accumulate_response_stage_metrics({"0": {"num_tokens_out": 3, "vllm_tpot_ms": 100.0}})
+    expected = client["0"]["vllm_tpot_ms"]
+    session.end_response()
+
+    assert expected == pytest.approx(25.0)
+    assert logged[0].stage_events[response_id][0].vllm_tpot_ms == pytest.approx(expected)

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import copy
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -105,6 +105,27 @@ def _as_float_list(value: object) -> list[float]:
     return [item for item in value if isinstance(item, int | float) and not isinstance(item, bool)]
 
 
+def _tpot_interval_weight(token_count: object) -> int:
+    if isinstance(token_count, int | float) and not isinstance(token_count, bool):
+        return max(int(token_count) - 1, 1)
+    return 1
+
+
+def _weighted_tpot_ms(events: Sequence[StageRequestStats]) -> float | None:
+    weighted_ms = 0.0
+    weight = 0
+    for event in events:
+        tpot_ms = float(event.vllm_tpot_ms)
+        if tpot_ms <= 0:
+            continue
+        chunk_weight = _tpot_interval_weight(event.num_tokens_out)
+        weighted_ms += tpot_ms * chunk_weight
+        weight += chunk_weight
+    if weight <= 0:
+        return None
+    return weighted_ms / float(weight)
+
+
 def _apply_merged_stage_stats(template: StageRequestStats, merged: dict[str, object]) -> StageRequestStats:
     """Write one ``_merge_stage_metric_event`` snapshot back onto a stats row."""
     stats = copy.copy(template)
@@ -146,13 +167,22 @@ def _one_row_per_stage(events: list[StageRequestStats]) -> list[StageRequestStat
     """Fold chunk snapshots so the logger table has one column per stage."""
     merged_by_stage: dict[int, dict[str, object]] = {}
     templates: dict[int, StageRequestStats] = {}
+    chunks_by_stage: dict[int, list[StageRequestStats]] = {}
     for evt in events:
         if evt.stage_id is None:
             continue
         sid = int(evt.stage_id)
         templates.setdefault(sid, evt)
+        chunks_by_stage.setdefault(sid, []).append(evt)
         merged_by_stage[sid] = OrchestratorAggregator._merge_stage_metric_event(merged_by_stage.get(sid), evt)
-    return [_apply_merged_stage_stats(templates[sid], merged_by_stage[sid]) for sid in sorted(merged_by_stage)]
+    rows: list[StageRequestStats] = []
+    for sid in sorted(merged_by_stage):
+        merged = merged_by_stage[sid]
+        tpot_ms = _weighted_tpot_ms(chunks_by_stage[sid])
+        if tpot_ms is not None:
+            merged[metric_defs.VLLM_TPOT_MS] = tpot_ms
+        rows.append(_apply_merged_stage_stats(templates[sid], merged))
+    return rows
 
 
 @dataclass
@@ -833,12 +863,20 @@ class DuplexEngineSession:
         self._response.stage_metric_tpot_weighted_ms.clear()
         self._response.stage_metric_tpot_weight.clear()
 
+    def _response_aggregator_wall_start_ts(self) -> float:
+        now_wall_s = time.time()
+        started_at_s = self._response.active_response_request_started_at_s
+        if started_at_s is None:
+            return now_wall_s
+        elapsed_s = max(0.0, self._clock() - started_at_s)
+        return now_wall_s - elapsed_s
+
     def _new_response_aggregator(self) -> OrchestratorAggregator:
         num_stages = max(int(self.num_stages), 1)
         return OrchestratorAggregator(
             num_stages=num_stages,
             log_stats=True,
-            wall_start_ts=time.time(),
+            wall_start_ts=self._response_aggregator_wall_start_ts(),
             final_stage_id_for_e2e=num_stages - 1,
             stage_table_exclude=DUPLEX_STAGE_TABLE_EXCLUDE,
         )
@@ -1035,7 +1073,7 @@ class DuplexEngineSession:
             tpot_ms = raw_values.get("vllm_tpot_ms")
             token_count = raw_values.get("num_tokens_out")
             if isinstance(tpot_ms, int | float) and tpot_ms > 0:
-                weight = max(int(token_count) - 1, 1) if isinstance(token_count, int | float) else 1
+                weight = _tpot_interval_weight(token_count)
                 self._response.stage_metric_tpot_weighted_ms[stage_id] = (
                     self._response.stage_metric_tpot_weighted_ms.get(stage_id, 0.0) + float(tpot_ms) * weight
                 )
