@@ -45,6 +45,7 @@ from vllm_omni.engine.duplex.session.lease import (
 )
 from vllm_omni.metrics import definitions as metric_defs
 from vllm_omni.metrics.stats import DUPLEX_STAGE_TABLE_EXCLUDE, OrchestratorAggregator, StageRequestStats
+from vllm_omni.metrics.utils import _as_float, _as_float_list, _as_int, _as_optional_int
 
 if TYPE_CHECKING:
     from vllm_omni.engine.duplex.plugin import DuplexModelSessionState
@@ -59,26 +60,6 @@ def _object_dict(**fields: object) -> dict[str, object]:
     return dict(fields)
 
 
-def _as_int(value: object, default: int = 0) -> int:
-    if isinstance(value, bool):
-        return default
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    return default
-
-
-def _as_optional_int(value: object) -> int | None:
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    return None
-
-
 def _copy_mapping(value: object) -> dict[str, object] | None:
     if not isinstance(value, dict):
         return None
@@ -89,20 +70,6 @@ def _copy_list(value: object) -> list[object] | None:
     if not isinstance(value, list):
         return None
     return [item for item in value]
-
-
-def _as_float(value: object, default: float = 0.0) -> float:
-    if isinstance(value, bool):
-        return default
-    if isinstance(value, int | float):
-        return float(value)
-    return default
-
-
-def _as_float_list(value: object) -> list[float]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, int | float) and not isinstance(item, bool)]
 
 
 def _tpot_interval_weight(token_count: object) -> int:
