@@ -426,32 +426,33 @@ class OmniInteractJudge:
             ),
         )
         parsed = _first_json_object(raw)
-        score: float | None = None
-        json_score_failed = False
-        if parsed is not None and "score" in parsed:
+        if parsed is not None:
             score, json_score_failed = _required_json_unit_score(parsed)
-        if json_score_failed:
+            if json_score_failed:
+                return CoreJudgment(
+                    score=0.0,
+                    trigger_phrase="",
+                    spoiler=False,
+                    rationale=_text(parsed.get("rationale")),
+                    raw=raw,
+                    parse_source="llm_parse_failed",
+                )
             return CoreJudgment(
-                score=0.0,
-                trigger_phrase="",
-                spoiler=False,
-                rationale=_text(parsed.get("rationale")) if parsed else "",
+                score=score if score is not None else 0.0,
+                trigger_phrase=_text(parsed.get("trigger_phrase")),
+                spoiler=_bool(parsed.get("spoiler")),
+                rationale=_text(parsed.get("rationale")),
                 raw=raw,
-                parse_source="llm_parse_failed",
+                parse_source="llm_json",
             )
-        # Missing JSON ``score`` may still recover via anchored float text.
-        fallback = _score_float_from_text(raw) if score is None else None
+        fallback = _score_float_from_text(raw)
         return CoreJudgment(
-            score=score if score is not None else fallback if fallback is not None else 0.0,
-            trigger_phrase=_text(parsed.get("trigger_phrase")) if parsed else "",
-            spoiler=_bool(parsed.get("spoiler")) if parsed else False,
-            rationale=_text(parsed.get("rationale")) if parsed else "",
+            score=fallback if fallback is not None else 0.0,
+            trigger_phrase="",
+            spoiler=False,
+            rationale="",
             raw=raw,
-            parse_source="llm_json"
-            if score is not None
-            else "llm_float_text"
-            if fallback is not None
-            else "llm_parse_failed",
+            parse_source="llm_float_text" if fallback is not None else "llm_parse_failed",
         )
 
     def judge_interrupted_partial(

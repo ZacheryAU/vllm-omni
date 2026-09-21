@@ -347,6 +347,42 @@ def test_evaluate_batch_reports_missing_score_as_parse_failure(tmp_path: Path, m
     assert cached["status"] == "parse_failed"
 
 
+class _CoreRationaleNumberJudge(OmniInteractJudge):
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        *,
+        api_key: str = "EMPTY",
+        timeout_s: float = 60.0,
+        max_tokens: int = 512,
+    ) -> None:
+        super().__init__(base_url, model, api_key=api_key, timeout_s=timeout_s, max_tokens=max_tokens)
+
+    def _generate(self, system_prompt: str, user_prompt: str) -> str:
+        del system_prompt, user_prompt
+        return '{"rationale":"Cannot score: 1 required reference is missing."}'
+
+
+def test_evaluate_batch_rejects_core_rationale_number_as_parse_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import vllm_omni.benchmarks.omniinteract_eval as eval_mod
+
+    case, result = _realtime_eval_case(tmp_path, transcript_text="answer")
+    options = _eval_options(tmp_path, skip_existing=False)
+    monkeypatch.setattr(eval_mod, "OmniInteractJudge", _CoreRationaleNumberJudge)
+    evaluation = evaluate_batch([case], [result], options)
+    assert evaluation["status"] == "failed"
+    assert evaluation["evaluated"] == 0
+    assert evaluation["failed"] == 1
+    sample_id = f"{case.subset}__{Path(result.output_dir).name}"
+    cached = json.loads((options.output_dir / f"{sample_id}.unified_eval.json").read_text())
+    assert cached["status"] == "parse_failed"
+    assert cached["slots"][0]["stage_core"]["parse_source"] == "llm_parse_failed"
+    assert cached["slots"][0]["stage_core"]["S_core"] == 0.0
+
+
 def test_skip_existing_rejects_parse_failed_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import vllm_omni.benchmarks.omniinteract_eval as eval_mod
 
@@ -663,6 +699,13 @@ def test_core_score_float_ignores_leading_counts() -> None:
     assert core.parse_source == "llm_float_text"
 
 
+def test_core_missing_json_score_does_not_use_rationale_number() -> None:
+    raw = '{"rationale":"Cannot score: 1 required reference is missing."}'
+    core = _GeneratedJudge([raw]).judge_core({"question_text": "q", "gt_answer": "a"}, "ctx", "answer", "(none)")
+    assert core.score == 0.0
+    assert core.parse_source == "llm_parse_failed"
+
+
 def test_early_missing_score_and_unparsed_flag() -> None:
     missing_score = _GeneratedJudge(['{"flag":"Neutral","rationale":"ok"}'])
     early = missing_score.judge_early({"question_text": "q", "gt_answer": "a"}, "ctx", "hi")
@@ -683,6 +726,7 @@ def test_early_missing_score_and_unparsed_flag() -> None:
         ("early", '{"flag":"Neutral","rationale":"Could not evaluate this answer"}'),
         ("early", '{"flag":"Neutral","score":"invalid","rationale":"bad"}'),
         ("core", '{"rationale":"Could not evaluate this answer"}'),
+        ("core", '{"rationale":"Cannot score: 1 required reference is missing."}'),
         ("core", '{"score":"invalid","trigger_phrase":"","spoiler":false,"rationale":"bad"}'),
         ("partial", '{"rationale":"Could not evaluate this answer"}'),
         ("partial", '{"score":"invalid","hallucination":false,"rationale":"bad"}'),

@@ -35,7 +35,7 @@ HARD = "Hard"
 SOFT = "Soft"
 PROTOCOL_SOURCE = "Lucky-Lance/OmniInteract@de304cef35fd9a50a5caadb5090c34cfbf0dd868"
 # Bump when slot scoring, judge prompts, or cached slot schema change.
-EVALUATOR_SCHEMA_VERSION = 2
+EVALUATOR_SCHEMA_VERSION = 3
 _HASH_CHUNK_BYTES = 65536
 _TRANSCRIPT_NAME = "wav_transcript.json"
 _PARSE_WARN_FRACTION = 0.1
