@@ -187,7 +187,9 @@ def _apply_merged_stage_stats(template: StageRequestStats, merged: dict[str, obj
     stats.image_pixels = _as_int(merged.get(defs.IMAGE_PIXELS))
     stats.denoise_step_latency_ms = _as_float(merged.get(defs.DENOISE_STEP_LATENCY_MS))
     stats.output_unit_type = (
-        str(merged["output_unit_type"]) if isinstance(merged.get("output_unit_type"), str) else template.output_unit_type
+        str(merged["output_unit_type"])
+        if isinstance(merged.get("output_unit_type"), str)
+        else template.output_unit_type
     )
     stats.output_unit_count = _as_int(merged.get(defs.OUTPUT_UNIT_COUNT))
     stats.serving_time_to_first_output_ms = _as_float(merged.get(defs.SERVING_TIME_TO_FIRST_OUTPUT_MS))
