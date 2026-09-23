@@ -538,7 +538,14 @@ def _videomme_repo_from_args(args, *, explicit: bool = False) -> str | None:
     return None
 
 
-def get_samples(args, tokenizer):
+def get_samples(args, tokenizer, **kwargs):
+    """Omni override of ``vllm.benchmarks.datasets.get_samples``.
+
+    ``**kwargs`` mirrors upstream's keyword-only arguments (today
+    ``multimodal_backends``, passed by ``vllm/benchmarks/throughput.py``) so that
+    any upstream caller reaching this patched replacement keeps working; they are
+    forwarded to the original implementation on every delegate path.
+    """
     # Daily-Omni: explicit dataset name, or hf + matching path/hf-name
     is_daily_omni = args.dataset_name == "daily-omni" or (
         args.dataset_name == "hf" and _daily_omni_repo_from_args(args) is not None
@@ -566,7 +573,7 @@ def get_samples(args, tokenizer):
 
     if not is_omni_backend and not is_omni_dataset:
         # Not an omni-related request, delegate to original implementation
-        return get_samples_old(args, tokenizer)
+        return get_samples_old(args, tokenizer, **kwargs)
 
     if is_omniinteract:
         dataset_path = getattr(args, "dataset_path", None)
@@ -883,7 +890,7 @@ def get_samples(args, tokenizer):
         )
         return input_requests
     else:
-        return get_samples_old(args, tokenizer)
+        return get_samples_old(args, tokenizer, **kwargs)
 
 
 datasets.get_samples = get_samples
@@ -1915,6 +1922,7 @@ async def async_request_openai_chat_omni_completions(
         output.peak_memory_mb = 0.0
         output.stage_durations = None
         completion_tokens_seen = 0
+        streaming_error_received = False
         try:
             async with session.post(url=api_url, json=payload, headers=headers) as response:
                 if response.status == 200:
@@ -1942,6 +1950,13 @@ async def async_request_openai_chat_omni_completions(
                             if chunk != "[DONE]":
                                 timestamp = time.perf_counter()
                                 data = json.loads(chunk)
+                                if (streaming_error := data.get("error")) is not None:
+                                    streaming_error_received = True
+                                    if isinstance(streaming_error, dict):
+                                        output.error = str(streaming_error.get("message") or streaming_error)
+                                    else:
+                                        output.error = str(streaming_error)
+                                    continue
                                 _update_output_stage_metrics_from_payload(output, data)
                                 _update_output_peak_memory_from_payload(output, data)
                                 _update_output_stage_durations_from_payload(output, data)
@@ -2126,7 +2141,7 @@ async def async_request_openai_chat_omni_completions(
                                     output.tts_output_pcm_bytes = (waveform * 32767).astype(np.int16).tobytes()
                             except Exception as ex:
                                 logger.warning("seed_tts WER PCM export failed: %s", ex)
-                    output.success = True
+                    output.success = not streaming_error_received
                 else:
                     output.error = response.reason or ""
                     output.success = False
@@ -2454,6 +2469,7 @@ async def async_request_openai_image_edits_omni(
                 timestamp = st
                 most_recent_text_timestamp = st
                 generated_text = ""
+                streaming_error_received = False
                 handler = StreamedResponseHandler()
                 async for chunk_bytes in response.content.iter_any():
                     if not chunk_bytes:
@@ -2469,6 +2485,13 @@ async def async_request_openai_image_edits_omni(
 
                         timestamp = time.perf_counter()
                         data = json.loads(chunk)
+                        if (streaming_error := data.get("error")) is not None:
+                            streaming_error_received = True
+                            if isinstance(streaming_error, dict):
+                                output.error = str(streaming_error.get("message") or streaming_error)
+                            else:
+                                output.error = str(streaming_error)
+                            continue
                         _update_output_stage_metrics_from_payload(
                             output,
                             data,
@@ -2509,7 +2532,7 @@ async def async_request_openai_image_edits_omni(
                             output.denoise_step_latency_ms = metrics_denoise_step_ms
                 output.latency = timestamp - st
                 output.generated_text = generated_text
-                output.success = True
+                output.success = not streaming_error_received
             else:
                 data = await response.json()
                 _finalize_image_json_http_response(
