@@ -151,14 +151,25 @@ def collect_duplex_session_metrics(
         if isinstance(raw_metric, dict):
             metric.update(raw_metric)
             metric["rtf"] = audio_rtf_from_raw_metric(raw_metric)
-            metric["client_ttft_ms"], metric["client_ttfp_ms"] = _client_response_latencies(
-                collector, response_id, after_s=stream_start
-            )
+            created_ttft_ms, created_ttfp_ms = _client_response_latencies(collector, response_id, after_s=stream_start)
+            metric["client_ttft_ms"] = created_ttft_ms
             origin = metric.get("measurement_origin")
-            metric["measurement_origin"] = {
+            merged_origin = {
                 **(origin if isinstance(origin, dict) else {}),
-                **_CLIENT_MEASUREMENT_ORIGIN,
+                "client_ttft": _CLIENT_MEASUREMENT_ORIGIN["client_ttft"],
             }
+            if "client_ttfp_ms" not in metric:
+                metric["client_ttfp_ms"] = created_ttfp_ms
+                merged_origin["client_ttfp"] = _CLIENT_MEASUREMENT_ORIGIN["client_ttfp"]
+            metric["measurement_origin"] = merged_origin
+            client_rtf = audio_rtf_from_raw_metric(
+                {
+                    "audio_generation_ms": raw_metric.get("client_audio_generation_ms"),
+                    "audio_duration_ms": raw_metric.get("audio_duration_ms"),
+                }
+            )
+            if client_rtf is not None:
+                metric["client_rtf"] = client_rtf
         copied_stages: dict[str, dict[str, object]] = {}
         if isinstance(stages, dict):
             for stage_id, stage_snapshot in stages.items():
