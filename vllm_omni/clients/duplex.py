@@ -40,6 +40,7 @@ import random
 import time
 import wave
 from abc import ABC, abstractmethod
+from bisect import bisect_left, bisect_right, insort
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -986,16 +987,7 @@ class DuplexClientBase(ABC):
             raise DuplexConnectionError(f"send failed: {exc}") from exc
         collector = self._event_collector
         if collector is not None and payload.get("type") == "input_audio_buffer.append":
-            frames = payload.get("video_frames")
-            is_speech = payload.get("is_speech")
-            collector.note_client_append(
-                {
-                    "sent_at_s": time.monotonic(),
-                    "event_id": event_id,
-                    "is_speech": is_speech if isinstance(is_speech, bool) else None,
-                    "has_video": isinstance(frames, list) and any(isinstance(frame, str) and frame for frame in frames),
-                }
-            )
+            collector.note_client_append({"sent_at_s": time.monotonic(), "event_id": event_id})
         return event_id
 
     # -- internals ---------------------------------------------------------------
@@ -1455,8 +1447,6 @@ class ClientAppendStamp(TypedDict):
 
     sent_at_s: float
     event_id: str
-    is_speech: bool | None
-    has_video: bool
 
 
 _CLIENT_APPEND_TTFP_ORIGIN = (
@@ -1484,10 +1474,14 @@ class EventCollector:
         self.response_ids: list[str] = []
         self.output_sample_rate_hz = 24_000
         self.client_appends: list[ClientAppendStamp] = []
+        self._append_sent_at_s: list[float] = []
+        self._response_created_at_s: dict[str, float] = {}
 
     def note_client_append(self, record: ClientAppendStamp) -> None:
         """Record one successful append send (same monotonic clock as ``add``)."""
+        sent_at_s = float(record["sent_at_s"])
         self.client_appends.append(record)
+        insort(self._append_sent_at_s, sent_at_s)
 
     def _client_append_origin_s(
         self,
@@ -1505,17 +1499,12 @@ class EventCollector:
             except ValueError:
                 previous_index = -1
             if previous_index >= 0:
-                previous_id = self.response_ids[previous_index]
-                for event, received_at_s in zip(self.events, self.event_received_at_s, strict=True):
-                    if event.get("type") == "response.created" and wrap_event(event).response_id == previous_id:
-                        prev_created_at_s = received_at_s
-                        break
-        started_at_s: float | None = None
-        for record in self.client_appends:
-            sent_at_s = float(record["sent_at_s"])
-            if prev_created_at_s <= sent_at_s <= response_created_at_s:
-                started_at_s = sent_at_s
-        return started_at_s
+                prev_created_at_s = self._response_created_at_s.get(self.response_ids[previous_index], after_s)
+        lo = bisect_left(self._append_sent_at_s, prev_created_at_s)
+        hi = bisect_right(self._append_sent_at_s, response_created_at_s)
+        if lo >= hi:
+            return None
+        return self._append_sent_at_s[hi - 1]
 
     async def consume(self, client: DuplexClientBase) -> None:
         """Subscribe to ``client`` and collect until the session ends."""
@@ -1541,6 +1530,7 @@ class EventCollector:
         response_id = wrapped.response_id
         if stored_event.get("type") == "response.created" and response_id and response_id not in self.response_ids:
             self.response_ids.append(response_id)
+            self._response_created_at_s[response_id] = received_at
         if stored_event.get("type") in _AUDIO_DELTA_TYPES:
             chunk = wrapped.audio
             if chunk and response_id:

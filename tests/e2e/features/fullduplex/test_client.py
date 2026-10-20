@@ -265,9 +265,8 @@ async def test_realtime_client_stamps_append_after_send():
     )
     await client.send({"type": "input_audio_buffer.commit"})
     assert len(client.events.client_appends) == 1
-    assert client.events.client_appends[0]["has_video"] is True
+    assert client.events.client_appends[0].keys() == {"sent_at_s", "event_id"}
     assert client.events.client_appends[0]["event_id"] == ""
-    assert client.events.client_appends[0]["is_speech"] is None
 
 
 def test_realtime_event_collector_partitions_audio_by_response():

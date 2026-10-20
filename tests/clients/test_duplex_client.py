@@ -1436,8 +1436,8 @@ def _audio_delta(response_id: str, *, duration_ms: int) -> dict[str, object]:
 
 def test_event_collector_adds_client_append_metrics_from_last_in_window():
     collector = EventCollector()
-    collector.note_client_append({"sent_at_s": 9.4, "event_id": "append-early", "is_speech": True, "has_video": False})
-    collector.note_client_append({"sent_at_s": 9.7, "event_id": "append-last", "is_speech": True, "has_video": False})
+    collector.note_client_append({"sent_at_s": 9.4, "event_id": "append-early"})
+    collector.note_client_append({"sent_at_s": 9.7, "event_id": "append-last"})
     collector.add({"type": "response.created", "response": {"id": "resp-a"}}, received_at_s=10.0)
     collector.add(_audio_delta("resp-a", duration_ms=80), received_at_s=10.2)
     collector.add(_audio_delta("resp-a", duration_ms=240), received_at_s=10.36)
@@ -1455,14 +1455,12 @@ def test_event_collector_adds_client_append_metrics_from_last_in_window():
 
 def test_event_collector_client_origin_uses_previous_created_or_after_s():
     collector = EventCollector()
-    collector.note_client_append({"sent_at_s": 8.8, "event_id": "before-window", "is_speech": None, "has_video": False})
-    collector.note_client_append({"sent_at_s": 9.5, "event_id": "first-turn", "is_speech": None, "has_video": False})
+    collector.note_client_append({"sent_at_s": 8.8, "event_id": "before-window"})
+    collector.note_client_append({"sent_at_s": 9.5, "event_id": "first-turn"})
     collector.add({"type": "response.created", "response": {"id": "resp-a"}}, received_at_s=10.0)
     collector.add(_audio_delta("resp-a", duration_ms=80), received_at_s=10.2)
-    collector.note_client_append({"sent_at_s": 10.4, "event_id": "second-turn", "is_speech": None, "has_video": False})
-    collector.note_client_append(
-        {"sent_at_s": 11.1, "event_id": "after-second-created", "is_speech": None, "has_video": False}
-    )
+    collector.note_client_append({"sent_at_s": 10.4, "event_id": "second-turn"})
+    collector.note_client_append({"sent_at_s": 11.1, "event_id": "after-second-created"})
     collector.add({"type": "response.created", "response": {"id": "resp-b"}}, received_at_s=11.0)
     collector.add(_audio_delta("resp-b", duration_ms=100), received_at_s=11.3)
 
@@ -1495,8 +1493,7 @@ async def test_send_stamps_append_on_attached_collector():
         sock.feed(SESSION_CLOSED)
 
     assert [record["event_id"] for record in collector.client_appends] == [event_id]
-    assert collector.client_appends[0]["is_speech"] is True
-    assert collector.client_appends[0]["has_video"] is True
+    assert collector.client_appends[0].keys() == {"sent_at_s", "event_id"}
     assert collector.client_appends[0]["sent_at_s"] > 0.0
 
 

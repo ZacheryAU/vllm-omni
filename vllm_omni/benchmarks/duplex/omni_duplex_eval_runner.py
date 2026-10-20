@@ -140,15 +140,7 @@ def _event_collector_from_realtime(source: RealtimeEventCollector) -> EventColle
         event_id = record.get("event_id")
         if not isinstance(sent_at_s, int | float) or not isinstance(event_id, str):
             continue
-        is_speech = record.get("is_speech")
-        collector.note_client_append(
-            {
-                "sent_at_s": float(sent_at_s),
-                "event_id": event_id,
-                "is_speech": is_speech if isinstance(is_speech, bool) else None,
-                "has_video": bool(record.get("has_video")),
-            }
-        )
+        collector.note_client_append({"sent_at_s": float(sent_at_s), "event_id": event_id})
     return collector
 
 

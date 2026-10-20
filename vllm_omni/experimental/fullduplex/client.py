@@ -248,14 +248,10 @@ class RealtimeDuplexClient:
         if event.get("type") != "input_audio_buffer.append":
             return
         event_id = event.get("event_id")
-        frames = event.get("video_frames")
-        is_speech = event.get("is_speech")
         self.events.note_client_append(
             {
                 "sent_at_s": time.monotonic(),
                 "event_id": event_id if isinstance(event_id, str) else "",
-                "is_speech": is_speech if isinstance(is_speech, bool) else None,
-                "has_video": isinstance(frames, list) and any(isinstance(frame, str) and frame for frame in frames),
             }
         )
 
