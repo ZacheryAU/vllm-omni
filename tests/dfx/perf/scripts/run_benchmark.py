@@ -268,7 +268,8 @@ def _start_omni_server(server_param):
     if extra:
         server_args = list(extra) + server_args
     judge_params = _judge_server_params_for_test(test_name)
-    with OmniServer(model, server_args, use_omni=use_omni, env_dict=_omni_server_env()) as server:
+    server_env = _omni_server_env()
+    with OmniServer(model, server_args, use_omni=use_omni, env_dict=server_env) as server:
         server.test_name = test_name
         server.judge_base_url = None
         print("OmniServer started successfully")
@@ -371,12 +372,124 @@ def _is_finite_number(value: object) -> TypeGuard[int | float]:
 _OMNIINTERACT_AGGREGATE_MIN_IA_QTF1 = "omniinteract_aggregate_min_ia_qtf1"
 _OMNIINTERACT_AGGREGATE_SUBSETS = "omniinteract_aggregate_subsets"
 _OMNIINTERACT_AGGREGATE_GROUP = "omniinteract_aggregate_group"
+_OMNIINTERACT_SAMPLES = "omniinteract_samples"
+_OMNIINTERACT_DATASET = "omniinteract_dataset"
+_OMNIINTERACT_MIN_PAQ = "omniinteract_min_paq"
+_OMNIINTERACT_MAX_CSM_AS = "omniinteract_max_csm_as"
+_OMNIINTERACT_DATA_ROOT_ENV = "VLLM_OMNIINTERACT_DATA_ROOT"
+_OMNIINTERACT_PINNED_SAMPLE_COUNT = 4
 _OMNIINTERACT_AGGREGATE_COUNTS: dict[tuple[str, str], tuple[float, float, float]] = {}
 _OMNIINTERACT_MIN_EVALUATED_CASES = 1
+_BENCHMARK_CLI_EXCLUDE_KEYS = frozenset(
+    {
+        "request_rate",
+        "baseline",
+        "num_prompts",
+        "max_concurrency",
+        "num_warmups",
+        "task",
+        "enabled",
+        "eval_phase",
+        "trust_remote_code",
+        "expected_duplex_audio_turns_per_session",
+        "omniinteract_min_ia_qtf1",
+        _OMNIINTERACT_MIN_PAQ,
+        _OMNIINTERACT_MAX_CSM_AS,
+        _OMNIINTERACT_AGGREGATE_MIN_IA_QTF1,
+        _OMNIINTERACT_AGGREGATE_SUBSETS,
+        _OMNIINTERACT_AGGREGATE_GROUP,
+        _OMNIINTERACT_SAMPLES,
+        _OMNIINTERACT_DATASET,
+        "judge_server_params",
+        "duplex_eval_accuracy_config",
+        "name",
+        "enable_negative_prompt",
+        "random_request_config",
+        "num_input_images",
+        "warmup_requests",
+        "warmup_concurrency",
+        "warmup_num_inference_steps",
+    }
+)
 
 
 def _reset_omniinteract_aggregate_counts() -> None:
     _OMNIINTERACT_AGGREGATE_COUNTS.clear()
+
+
+def _omniinteract_pinned_samples(raw: object) -> list[dict[str, str]]:
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("omniinteract_samples must be a non-empty list")
+    samples: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for index, row in enumerate(raw, start=1):
+        if not isinstance(row, dict):
+            raise TypeError(f"omniinteract_samples[{index}] must be a JSON object")
+        subset = str(row.get("subset") or "")
+        video_rel = str(row.get("video_rel") or "")
+        output_name = str(row.get("output_name") or "")
+        if not subset or not video_rel or not output_name:
+            raise ValueError(f"omniinteract_samples[{index}] requires subset, video_rel, and output_name")
+        if output_name in seen:
+            raise ValueError(f"omniinteract_samples contains duplicate output_name: {output_name}")
+        seen.add(output_name)
+        samples.append({"subset": subset, "video_rel": video_rel, "output_name": output_name})
+    if len(samples) != _OMNIINTERACT_PINNED_SAMPLE_COUNT:
+        raise ValueError(f"omniinteract_samples must pin {_OMNIINTERACT_PINNED_SAMPLE_COUNT} cases, got {len(samples)}")
+    return samples
+
+
+def _materialize_omniinteract_video_list(params: dict[str, Any]) -> Path:
+    """Resolve Hub/local OmniInteract files and write a host-absolute video_list JSONL.
+
+    Git identity is ``subset`` + ``video_rel`` + ``output_name``. Absolute
+    ``video_path`` is filled in at runtime so ``--omniinteract-video-list`` stays
+    portable. ``dataset_path`` must not be combined with that flag.
+    """
+    from vllm_omni.benchmarks.data_modules.omniinteract_dataset import resolve_omniinteract_root
+
+    samples = _omniinteract_pinned_samples(params.get(_OMNIINTERACT_SAMPLES))
+    if params.get("dataset_path"):
+        raise ValueError("omniinteract_samples cannot be combined with dataset_path")
+    dataset = str(params.get(_OMNIINTERACT_DATASET) or "").strip()
+    if not dataset:
+        raise ValueError("omniinteract_dataset is required when omniinteract_samples is set")
+    override = os.environ.get(_OMNIINTERACT_DATA_ROOT_ENV, "").strip()
+    root = resolve_omniinteract_root(override or None, dataset)
+    result_dir = Path(os.environ.get("BENCHMARK_DIR", "tests/dfx/perf/results"))
+    destination = result_dir / "omniinteract_pinned_video_list.jsonl"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    for sample in samples:
+        video_path = (root / sample["subset"] / sample["video_rel"]).resolve()
+        if not video_path.is_file():
+            raise FileNotFoundError(
+                f"OmniInteract sample missing: subset={sample['subset']!r} "
+                f"video_rel={sample['video_rel']!r} path={video_path}"
+            )
+        lines.append(
+            json.dumps(
+                {
+                    "video_path": str(video_path),
+                    "output_name": sample["output_name"],
+                    "subset": sample["subset"],
+                },
+                ensure_ascii=False,
+            )
+        )
+    destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return destination
+
+
+def _prepare_omniinteract_bench_params(params: dict[str, Any]) -> dict[str, Any]:
+    prepared = dict(params)
+    if prepared.get(_OMNIINTERACT_SAMPLES) is None:
+        return prepared
+    output_dir = prepared.get("omniinteract_output_dir")
+    if isinstance(output_dir, str) and output_dir:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+    prepared["omniinteract_video_list"] = str(_materialize_omniinteract_video_list(prepared))
+    return prepared
 
 
 def _ia_qtf1_from_counts(tp: float, fp: float, fn: float) -> float:
@@ -437,6 +550,36 @@ def _aggregate_accuracy_params_for_test(test_name: str) -> dict[str, object]:
         _OMNIINTERACT_AGGREGATE_SUBSETS: subsets,
         _OMNIINTERACT_AGGREGATE_GROUP: test_name,
     }
+
+
+def _assert_omniinteract_paq_floor(params: dict[str, object], acc_summary: dict[str, object]) -> None:
+    """Run-level PAQ is the mean partial-quality of interrupted slots with output."""
+
+    minimum = params.get(_OMNIINTERACT_MIN_PAQ)
+    if minimum is None:
+        return
+    assert _is_finite_number(minimum), "omniinteract_min_paq must be a finite number"
+    interruption = acc_summary.get("interruption")
+    assert isinstance(interruption, dict), "OmniInteract interruption summary is missing"
+    paq = interruption.get("PAQ")
+    assert _is_finite_number(paq), "OmniInteract PAQ is missing"
+    print(f"OmniInteract PAQ: {float(paq):.6f} (must be >= {float(minimum):g})")
+    assert float(paq) >= float(minimum), f"OmniInteract PAQ {paq} is below {minimum}"
+
+
+def _assert_omniinteract_csm_as_ceiling(params: dict[str, object], acc_summary: dict[str, object]) -> None:
+    """Run-level CSM-AS is mean spill seconds among interrupted slots with output."""
+
+    maximum = params.get(_OMNIINTERACT_MAX_CSM_AS)
+    if maximum is None:
+        return
+    assert _is_finite_number(maximum), "omniinteract_max_csm_as must be a finite number"
+    interruption = acc_summary.get("interruption")
+    assert isinstance(interruption, dict), "OmniInteract interruption summary is missing"
+    csm_as = interruption.get("CSM_AS")
+    assert _is_finite_number(csm_as), "OmniInteract CSM-AS is missing"
+    print(f"OmniInteract CSM-AS: {float(csm_as):.6f}s (must be <= {float(maximum):g})")
+    assert float(csm_as) <= float(maximum), f"OmniInteract CSM-AS {csm_as} is above {maximum}"
 
 
 def _maybe_assert_aggregate_ia_qtf1(params: dict[str, object], acc_summary: dict[str, object]) -> None:
@@ -548,6 +691,8 @@ def assert_result(result, params, num_prompt) -> None:
                 assert float(ia_qtf1) >= float(min_ia_qtf1), (
                     f"OmniInteract All Global IA-QTF1 {ia_qtf1} is below {min_ia_qtf1}"
                 )
+            _assert_omniinteract_paq_floor(params, acc_summary)
+            _assert_omniinteract_csm_as_ceiling(params, acc_summary)
             _maybe_assert_aggregate_ia_qtf1(params, acc_summary)
     baseline = params.get("baseline")
     hardware = result.get("Hardware")
@@ -582,7 +727,7 @@ def assert_result(result, params, num_prompt) -> None:
 )
 def test_performance_benchmark(omni_server, benchmark_params):
     test_name = benchmark_params["test_name"]
-    params = dict(benchmark_params["params"])
+    params = _prepare_omniinteract_bench_params(dict(benchmark_params["params"]))
     dataset_name = params.get("dataset_name", "")
     accuracy_baseline = None
     if path := params.get("duplex_eval_accuracy_config"):
@@ -627,31 +772,7 @@ def test_performance_benchmark(omni_server, benchmark_params):
         raise ValueError("The number of prompts does not match the QPS or max_concurrency")
 
     args = ["--host", host, "--port", str(port)]
-    exclude_keys = {
-        "request_rate",
-        "baseline",
-        "num_prompts",
-        "max_concurrency",
-        "num_warmups",
-        "task",
-        "enabled",
-        "eval_phase",
-        "trust_remote_code",
-        "expected_duplex_audio_turns_per_session",
-        "omniinteract_min_ia_qtf1",
-        _OMNIINTERACT_AGGREGATE_MIN_IA_QTF1,
-        _OMNIINTERACT_AGGREGATE_SUBSETS,
-        _OMNIINTERACT_AGGREGATE_GROUP,
-        "judge_server_params",
-        "duplex_eval_accuracy_config",
-        "name",
-        "enable_negative_prompt",
-        "random_request_config",
-        "num_input_images",
-        "warmup_requests",
-        "warmup_concurrency",
-        "warmup_num_inference_steps",
-    }
+    exclude_keys = _BENCHMARK_CLI_EXCLUDE_KEYS
 
     param_keys = {str(key).replace("-", "_") for key in params}
     if "model" not in param_keys:
