@@ -73,6 +73,7 @@
         "omniinteract_output_dir": "tests/dfx/perf/results/omniinteract_acc",
         "omniinteract_max_video_duration_s": 600,
         "omniinteract_evaluate": true,
+        "omniinteract_require_full_coverage": true,
         "omniinteract_judge_model": "Qwen2.5-7B-Instruct",
         "omniinteract_min_ia_qtf1": 0.3,
         "omniinteract_min_paq": 0.4,

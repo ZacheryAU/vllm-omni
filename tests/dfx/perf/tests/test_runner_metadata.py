@@ -931,6 +931,7 @@ def test_omniinteract_internal_keys_excluded_from_cli_args():
         "dataset_name": "omniinteract",
         "omniinteract_samples": _pinned_acc_samples(),
         "omniinteract_dataset": "lucky-lance/OmniInteract",
+        "omniinteract_require_full_coverage": True,
         "omniinteract_video_list": "/tmp/omniinteract_pinned_video_list.jsonl",
     }
     args: list[str] = []
@@ -946,6 +947,7 @@ def test_omniinteract_internal_keys_excluded_from_cli_args():
             args.extend([arg_name, str(value)])
     assert "--omniinteract-samples" not in args
     assert "--omniinteract-dataset" not in args
+    assert "--omniinteract-require-full-coverage" not in args
     assert "--omniinteract-video-list" in args
 
 
@@ -1128,6 +1130,106 @@ def test_omniinteract_result_rejects_csm_as_above_ceiling():
             {"dataset_name": "omniinteract", "omniinteract_evaluate": True, "omniinteract_max_csm_as": 12},
             4,
         )
+
+
+def _full_coverage_params() -> dict[str, object]:
+    return {
+        "dataset_name": "omniinteract",
+        "omniinteract_evaluate": True,
+        "omniinteract_require_full_coverage": True,
+        "omniinteract_samples": _pinned_acc_samples(),
+        "omniinteract_min_ia_qtf1": 0.3,
+        "omniinteract_min_paq": 0.4,
+        "omniinteract_max_csm_as": 12,
+    }
+
+
+_PINNED_SAMPLE_IDS = {
+    "1q1a/videos__0035": "1q1a__videos__0035--650365db",
+    "1q1a/videos__0038": "1q1a__videos__0038--b883ec91",
+    "1q1a_math/videos__0001": "1q1a_math__videos__0001--c8cf86b2",
+    "1qna/captaincook4d__Blender_Banana_Pancakes-21_44": (
+        "1qna__videos_bench__captaincook4d__Blender_Banana_Pancakes-21_44--55844d33"
+    ),
+}
+
+
+def _full_coverage_item(output_name: str) -> dict[str, str]:
+    return {"sample_id": _PINNED_SAMPLE_IDS[output_name], "status": "ok"}
+
+
+def _full_coverage_result(
+    *,
+    evaluated: int,
+    skipped: int,
+    items: list[dict[str, str]],
+) -> dict[str, object]:
+    return {
+        "completed": 4,
+        "omniinteract": {
+            "total": 4,
+            "success": 4,
+            "failed": 0,
+            "artifacts_complete": True,
+            "accuracy": {
+                "status": "ok",
+                "failed": 0,
+                "evaluated": evaluated,
+                "skipped": skipped,
+                "total": 4,
+                "summary": {
+                    "IA_QTF1": 0.5,
+                    "interruption": {"PAQ": 0.5, "CSM_AS": 1.0},
+                },
+                "items": items,
+            },
+        },
+    }
+
+
+def test_omniinteract_result_accepts_complete_four_case_coverage():
+    from tests.dfx.perf.scripts.run_benchmark import assert_result
+
+    items = [_full_coverage_item(sample["output_name"]) for sample in _pinned_acc_samples()]
+    assert_result(_full_coverage_result(evaluated=4, skipped=0, items=items), _full_coverage_params(), 4)
+
+
+def test_omniinteract_result_rejects_survivor_only_coverage():
+    from tests.dfx.perf.scripts.run_benchmark import assert_result
+
+    items = [_full_coverage_item(_pinned_acc_samples()[2]["output_name"])]
+    with pytest.raises(AssertionError, match="pinned coverage"):
+        assert_result(
+            _full_coverage_result(evaluated=1, skipped=3, items=items),
+            _full_coverage_params(),
+            4,
+        )
+
+
+def test_omniinteract_result_allows_skipped_cases_without_full_coverage():
+    from tests.dfx.perf.scripts.run_benchmark import assert_result
+
+    assert_result(
+        {
+            "completed": 4,
+            "omniinteract": {
+                "total": 4,
+                "success": 4,
+                "failed": 0,
+                "artifacts_complete": True,
+                "accuracy": {
+                    "status": "ok",
+                    "failed": 0,
+                    "evaluated": 1,
+                    "skipped": 3,
+                    "total": 4,
+                    "summary": {"IA_QTF1": 0.5},
+                },
+            },
+        },
+        {"dataset_name": "omniinteract", "omniinteract_evaluate": True},
+        4,
+    )
 
 
 def test_omniinteract_result_rejects_ia_qtf1_below_floor():

@@ -376,6 +376,7 @@ _OMNIINTERACT_SAMPLES = "omniinteract_samples"
 _OMNIINTERACT_DATASET = "omniinteract_dataset"
 _OMNIINTERACT_MIN_PAQ = "omniinteract_min_paq"
 _OMNIINTERACT_MAX_CSM_AS = "omniinteract_max_csm_as"
+_OMNIINTERACT_REQUIRE_FULL_COVERAGE = "omniinteract_require_full_coverage"
 _OMNIINTERACT_DATA_ROOT_ENV = "VLLM_OMNIINTERACT_DATA_ROOT"
 _OMNIINTERACT_PINNED_SAMPLE_COUNT = 4
 _OMNIINTERACT_AGGREGATE_COUNTS: dict[tuple[str, str], tuple[float, float, float]] = {}
@@ -395,6 +396,7 @@ _BENCHMARK_CLI_EXCLUDE_KEYS = frozenset(
         "omniinteract_min_ia_qtf1",
         _OMNIINTERACT_MIN_PAQ,
         _OMNIINTERACT_MAX_CSM_AS,
+        _OMNIINTERACT_REQUIRE_FULL_COVERAGE,
         _OMNIINTERACT_AGGREGATE_MIN_IA_QTF1,
         _OMNIINTERACT_AGGREGATE_SUBSETS,
         _OMNIINTERACT_AGGREGATE_GROUP,
@@ -514,6 +516,45 @@ def _assert_subset_evaluated(accuracy: dict[str, object]) -> None:
             f"OmniInteract subset evaluated {evaluated} cases (skipped={accuracy.get('skipped')}); "
             f"at least {_OMNIINTERACT_MIN_EVALUATED_CASES} evaluated case is required"
         )
+
+
+def _accuracy_item_matches_output_name(sample_id: str, output_name: str) -> bool:
+    subset, separator, rest = output_name.partition("/")
+    if not separator or not subset or not rest:
+        return False
+    body = sample_id.split("--", 1)[0]
+    return body.startswith(f"{subset}__") and rest in body
+
+
+def _assert_omniinteract_full_coverage(params: dict[str, object], accuracy: dict[str, object]) -> None:
+    """Pinned nightly lane: every expected sample identity must be evaluated."""
+
+    samples = _omniinteract_pinned_samples(params.get(_OMNIINTERACT_SAMPLES))
+    expected = [sample["output_name"] for sample in samples]
+    evaluated = accuracy.get("evaluated")
+    skipped = accuracy.get("skipped")
+    if not isinstance(evaluated, int) or isinstance(evaluated, bool):
+        raise AssertionError("OmniInteract accuracy evaluated count is missing")
+    if not isinstance(skipped, int) or isinstance(skipped, bool):
+        raise AssertionError("OmniInteract accuracy skipped count is missing")
+    if evaluated != len(expected) or skipped != 0:
+        raise AssertionError(
+            f"OmniInteract pinned coverage evaluated {evaluated} skipped={skipped}; "
+            f"{len(expected)} evaluated and 0 skipped are required"
+        )
+    items = accuracy.get("items")
+    if not isinstance(items, list):
+        raise AssertionError("OmniInteract accuracy items are missing")
+    found = [
+        str(item.get("sample_id") or "") for item in items if isinstance(item, dict) and item.get("status") == "ok"
+    ]
+    missing = [
+        output_name
+        for output_name in expected
+        if not any(_accuracy_item_matches_output_name(sample_id, output_name) for sample_id in found)
+    ]
+    if missing:
+        raise AssertionError(f"OmniInteract pinned coverage missing sample identities: {missing}")
 
 
 def _finite_accuracy_count(value: object, name: str) -> float:
@@ -680,7 +721,10 @@ def assert_result(result, params, num_prompt) -> None:
             assert isinstance(accuracy, dict), "OmniInteract accuracy is missing"
             assert accuracy.get("status") == "ok", "OmniInteract accuracy did not complete"
             assert accuracy.get("failed") == 0, "OmniInteract accuracy reported failed cases"
-            _assert_subset_evaluated(accuracy)
+            if params.get(_OMNIINTERACT_REQUIRE_FULL_COVERAGE):
+                _assert_omniinteract_full_coverage(params, accuracy)
+            else:
+                _assert_subset_evaluated(accuracy)
             acc_summary = accuracy.get("summary")
             assert isinstance(acc_summary, dict), "OmniInteract accuracy summary is missing"
             ia_qtf1 = acc_summary.get("IA_QTF1")
