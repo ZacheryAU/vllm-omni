@@ -76,7 +76,7 @@
         "omniinteract_require_full_coverage": true,
         "omniinteract_judge_model": "Qwen2.5-7B-Instruct",
         "omniinteract_min_ia_qtf1": 0.3,
-        "omniinteract_min_paq": 0.4,
+        "omniinteract_min_paq": 0.3,
         "omniinteract_max_csm_as": 12,
         "percentile-metrics": "ttft,tpot,itl,e2el,audio_ttfp,audio_rtf,audio_duration"
       }

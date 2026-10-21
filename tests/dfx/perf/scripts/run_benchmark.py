@@ -415,6 +415,28 @@ _BENCHMARK_CLI_EXCLUDE_KEYS = frozenset(
 )
 
 
+def _benchmark_cli_args(params: dict[str, object]) -> list[str]:
+    """Turn benchmark JSON fields into ``vllm bench serve`` CLI tokens."""
+
+    args: list[str] = []
+    for key, value in params.items():
+        if key in _BENCHMARK_CLI_EXCLUDE_KEYS or value is None:
+            continue
+        if key in {"extra_body", "extra-body"} and value == {}:
+            continue
+        arg_name = f"--{key.replace('_', '-')}"
+        if isinstance(value, bool) and value:
+            args.append(arg_name)
+        elif isinstance(value, dict):
+            json_str = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            args.extend([arg_name, json_str])
+        elif isinstance(value, list | tuple):
+            args.extend([arg_name, *map(str, value)])
+        elif not isinstance(value, bool):
+            args.extend([arg_name, str(value)])
+    return args
+
+
 def _reset_omniinteract_aggregate_counts() -> None:
     _OMNIINTERACT_AGGREGATE_COUNTS.clear()
 
@@ -816,29 +838,10 @@ def test_performance_benchmark(omni_server, benchmark_params):
         raise ValueError("The number of prompts does not match the QPS or max_concurrency")
 
     args = ["--host", host, "--port", str(port)]
-    exclude_keys = _BENCHMARK_CLI_EXCLUDE_KEYS
-
     param_keys = {str(key).replace("-", "_") for key in params}
     if "model" not in param_keys:
         args.extend(["--model", str(model)])
-
-    for key, value in params.items():
-        if key in exclude_keys or value is None:
-            continue
-        if key in {"extra_body", "extra-body"} and value == {}:
-            continue
-
-        arg_name = f"--{key.replace('_', '-')}"
-
-        if isinstance(value, bool) and value:
-            args.append(arg_name)
-        elif isinstance(value, dict):
-            json_str = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-            args.extend([arg_name, json_str])
-        elif isinstance(value, (list, tuple)):
-            args.extend([arg_name, *map(str, value)])
-        elif not isinstance(value, bool):
-            args.extend([arg_name, str(value)])
+    args.extend(_benchmark_cli_args(params))
 
     for config in BENCHMARK_CONFIGS:
         if config.get("test_name") != test_name:

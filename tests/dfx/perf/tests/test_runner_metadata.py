@@ -925,7 +925,7 @@ def _pinned_acc_samples() -> list[dict[str, str]]:
 
 
 def test_omniinteract_internal_keys_excluded_from_cli_args():
-    from tests.dfx.perf.scripts.run_benchmark import _BENCHMARK_CLI_EXCLUDE_KEYS
+    from tests.dfx.perf.scripts.run_benchmark import _benchmark_cli_args
 
     params = {
         "dataset_name": "omniinteract",
@@ -933,22 +933,17 @@ def test_omniinteract_internal_keys_excluded_from_cli_args():
         "omniinteract_dataset": "lucky-lance/OmniInteract",
         "omniinteract_require_full_coverage": True,
         "omniinteract_video_list": "/tmp/omniinteract_pinned_video_list.jsonl",
+        "extra_body": {},
+        "percentile-metrics": ["ttft", "audio_rtf"],
     }
-    args: list[str] = []
-    for key, value in params.items():
-        if key in _BENCHMARK_CLI_EXCLUDE_KEYS or value is None:
-            continue
-        arg_name = f"--{key.replace('_', '-')}"
-        if isinstance(value, bool) and value:
-            args.append(arg_name)
-        elif isinstance(value, dict):
-            args.extend([arg_name, json.dumps(value)])
-        elif not isinstance(value, bool):
-            args.extend([arg_name, str(value)])
+    args = _benchmark_cli_args(params)
     assert "--omniinteract-samples" not in args
     assert "--omniinteract-dataset" not in args
     assert "--omniinteract-require-full-coverage" not in args
+    assert "--extra-body" not in args
     assert "--omniinteract-video-list" in args
+    metrics_at = args.index("--percentile-metrics")
+    assert args[metrics_at : metrics_at + 3] == ["--percentile-metrics", "ttft", "audio_rtf"]
 
 
 def test_prepare_omniinteract_bench_params_writes_video_list(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
