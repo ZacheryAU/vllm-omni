@@ -172,7 +172,7 @@ steps:
           - tests/dfx/perf/results/omniinteract_acc/**/*
         commands:
           - export BENCHMARK_DIR=tests/dfx/perf/results
-          - pytest -s -v tests/dfx/perf/scripts/run_benchmark.py --test-config-file tests/dfx/perf/tests/test_minicpmo_4_5_duplex_omniinteract_acc.json -m "full_model and H100 and B200 and cuda and omni and cards_2" --run-level full_model
+          - pytest -s -v tests/dfx/perf/scripts/run_benchmark.py --test-config-file tests/dfx/perf/tests/test_minicpmo_4_5_duplex_omniinteract_acc.json -m "full_model and H100 and B200 and cuda and omni and cards_3" --run-level full_model
 
       - label: ":full_moon: Omni · Multi-Replica Startup Test with 4x H100"
         source_file_dependencies: omni_qwen3_omni_function

@@ -427,6 +427,8 @@ source_file_dependencies:
     - *minicpmo_4_5_duplex
     - tests/dfx/perf/scripts/run_benchmark.py
     - tests/dfx/perf/tests/test_minicpmo_4_5_duplex_omniinteract_acc.json
+    - vllm_omni/deploy/minicpmo_4_5_2gpu.yaml
+    - vllm_omni/deploy/minicpmo_4_5_2gpu_omniinteract_acc.yaml
     - tests/assets/minicpmo_4_5/response_required_16k.wav
     - vllm_omni/benchmarks/omniinteract.py
     - vllm_omni/benchmarks/omniinteract_eval.py

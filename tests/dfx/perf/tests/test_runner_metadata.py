@@ -921,6 +921,10 @@ def _pinned_acc_samples() -> list[dict[str, str]]:
             "video_rel": "videos_bench/captaincook4d/Blender_Banana_Pancakes-21_44.mp4",
             "output_name": "1qna/captaincook4d__Blender_Banana_Pancakes-21_44",
         },
+        {"subset": "1q1a", "video_rel": "videos/0124.mp4", "output_name": "1q1a/videos__0124"},
+        {"subset": "1q1a", "video_rel": "videos/0064.mp4", "output_name": "1q1a/videos__0064"},
+        {"subset": "1q1a", "video_rel": "videos/0100.mp4", "output_name": "1q1a/videos__0100"},
+        {"subset": "1q1a", "video_rel": "videos/0053.mp4", "output_name": "1q1a/videos__0053"},
     ]
 
 
@@ -932,6 +936,7 @@ def test_omniinteract_internal_keys_excluded_from_cli_args():
         "omniinteract_samples": _pinned_acc_samples(),
         "omniinteract_dataset": "lucky-lance/OmniInteract",
         "omniinteract_require_full_coverage": True,
+        "omniinteract_max_audio_rtf": 1,
         "omniinteract_video_list": "/tmp/omniinteract_pinned_video_list.jsonl",
         "extra_body": {},
         "percentile-metrics": ["ttft", "audio_rtf"],
@@ -940,6 +945,7 @@ def test_omniinteract_internal_keys_excluded_from_cli_args():
     assert "--omniinteract-samples" not in args
     assert "--omniinteract-dataset" not in args
     assert "--omniinteract-require-full-coverage" not in args
+    assert "--omniinteract-max-audio-rtf" not in args
     assert "--extra-body" not in args
     assert "--omniinteract-video-list" in args
     metrics_at = args.index("--percentile-metrics")
@@ -1127,6 +1133,35 @@ def test_omniinteract_result_rejects_csm_as_above_ceiling():
         )
 
 
+def _omniinteract_audio_rtf_result(mean_audio_rtf: float) -> dict[str, object]:
+    return {
+        "completed": 4,
+        "mean_audio_rtf": mean_audio_rtf,
+        "omniinteract": {"total": 4, "success": 4, "failed": 0, "artifacts_complete": True},
+    }
+
+
+def test_omniinteract_result_accepts_mean_audio_rtf_below_limit():
+    from tests.dfx.perf.scripts.run_benchmark import assert_result
+
+    assert_result(
+        _omniinteract_audio_rtf_result(0.999),
+        {"dataset_name": "omniinteract", "omniinteract_max_audio_rtf": 1},
+        4,
+    )
+
+
+def test_omniinteract_result_rejects_mean_audio_rtf_at_limit():
+    from tests.dfx.perf.scripts.run_benchmark import assert_result
+
+    with pytest.raises(AssertionError, match="mean_audio_rtf"):
+        assert_result(
+            _omniinteract_audio_rtf_result(1.0),
+            {"dataset_name": "omniinteract", "omniinteract_max_audio_rtf": 1},
+            4,
+        )
+
+
 def _full_coverage_params() -> dict[str, object]:
     return {
         "dataset_name": "omniinteract",
@@ -1146,6 +1181,10 @@ _PINNED_SAMPLE_IDS = {
     "1qna/captaincook4d__Blender_Banana_Pancakes-21_44": (
         "1qna__videos_bench__captaincook4d__Blender_Banana_Pancakes-21_44--55844d33"
     ),
+    "1q1a/videos__0124": "1q1a__videos__0124--b8fb919b",
+    "1q1a/videos__0064": "1q1a__videos__0064--0be0d0f5",
+    "1q1a/videos__0100": "1q1a__videos__0100--36db4520",
+    "1q1a/videos__0053": "1q1a__videos__0053--8045b863",
 }
 
 
@@ -1159,11 +1198,12 @@ def _full_coverage_result(
     skipped: int,
     items: list[dict[str, str]],
 ) -> dict[str, object]:
+    count = len(_pinned_acc_samples())
     return {
-        "completed": 4,
+        "completed": count,
         "omniinteract": {
-            "total": 4,
-            "success": 4,
+            "total": count,
+            "success": count,
             "failed": 0,
             "artifacts_complete": True,
             "accuracy": {
@@ -1171,7 +1211,7 @@ def _full_coverage_result(
                 "failed": 0,
                 "evaluated": evaluated,
                 "skipped": skipped,
-                "total": 4,
+                "total": count,
                 "summary": {
                     "IA_QTF1": 0.5,
                     "interruption": {"PAQ": 0.5, "CSM_AS": 1.0},
@@ -1182,22 +1222,28 @@ def _full_coverage_result(
     }
 
 
-def test_omniinteract_result_accepts_complete_four_case_coverage():
+def test_omniinteract_result_accepts_complete_pinned_coverage():
     from tests.dfx.perf.scripts.run_benchmark import assert_result
 
-    items = [_full_coverage_item(sample["output_name"]) for sample in _pinned_acc_samples()]
-    assert_result(_full_coverage_result(evaluated=4, skipped=0, items=items), _full_coverage_params(), 4)
+    samples = _pinned_acc_samples()
+    items = [_full_coverage_item(sample["output_name"]) for sample in samples]
+    assert_result(
+        _full_coverage_result(evaluated=len(samples), skipped=0, items=items),
+        _full_coverage_params(),
+        len(samples),
+    )
 
 
 def test_omniinteract_result_rejects_survivor_only_coverage():
     from tests.dfx.perf.scripts.run_benchmark import assert_result
 
-    items = [_full_coverage_item(_pinned_acc_samples()[2]["output_name"])]
+    samples = _pinned_acc_samples()
+    items = [_full_coverage_item(samples[2]["output_name"])]
     with pytest.raises(AssertionError, match="pinned coverage"):
         assert_result(
-            _full_coverage_result(evaluated=1, skipped=3, items=items),
+            _full_coverage_result(evaluated=1, skipped=len(samples) - 1, items=items),
             _full_coverage_params(),
-            4,
+            len(samples),
         )
 
 

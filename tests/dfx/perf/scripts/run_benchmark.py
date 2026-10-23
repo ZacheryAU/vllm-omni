@@ -376,9 +376,10 @@ _OMNIINTERACT_SAMPLES = "omniinteract_samples"
 _OMNIINTERACT_DATASET = "omniinteract_dataset"
 _OMNIINTERACT_MIN_PAQ = "omniinteract_min_paq"
 _OMNIINTERACT_MAX_CSM_AS = "omniinteract_max_csm_as"
+_OMNIINTERACT_MAX_AUDIO_RTF = "omniinteract_max_audio_rtf"
 _OMNIINTERACT_REQUIRE_FULL_COVERAGE = "omniinteract_require_full_coverage"
 _OMNIINTERACT_DATA_ROOT_ENV = "VLLM_OMNIINTERACT_DATA_ROOT"
-_OMNIINTERACT_PINNED_SAMPLE_COUNT = 4
+_OMNIINTERACT_PINNED_SAMPLE_COUNT = 8
 _OMNIINTERACT_AGGREGATE_COUNTS: dict[tuple[str, str], tuple[float, float, float]] = {}
 _OMNIINTERACT_MIN_EVALUATED_CASES = 1
 _BENCHMARK_CLI_EXCLUDE_KEYS = frozenset(
@@ -396,6 +397,7 @@ _BENCHMARK_CLI_EXCLUDE_KEYS = frozenset(
         "omniinteract_min_ia_qtf1",
         _OMNIINTERACT_MIN_PAQ,
         _OMNIINTERACT_MAX_CSM_AS,
+        _OMNIINTERACT_MAX_AUDIO_RTF,
         _OMNIINTERACT_REQUIRE_FULL_COVERAGE,
         _OMNIINTERACT_AGGREGATE_MIN_IA_QTF1,
         _OMNIINTERACT_AGGREGATE_SUBSETS,
@@ -645,6 +647,19 @@ def _assert_omniinteract_csm_as_ceiling(params: dict[str, object], acc_summary: 
     assert float(csm_as) <= float(maximum), f"OmniInteract CSM-AS {csm_as} is above {maximum}"
 
 
+def _assert_omniinteract_audio_rtf_ceiling(result: dict[str, object], params: dict[str, object]) -> None:
+    """Run-level audio RTF is the benchmark mean and must stay strictly below the limit."""
+
+    maximum = params.get(_OMNIINTERACT_MAX_AUDIO_RTF)
+    if maximum is None:
+        return
+    assert _is_finite_number(maximum), "omniinteract_max_audio_rtf must be a finite number"
+    rtf = result.get("mean_audio_rtf")
+    assert _is_finite_number(rtf), "mean_audio_rtf is missing"
+    print(f"OmniInteract mean_audio_rtf: {float(rtf):.6f} (must be < {float(maximum):g})")
+    assert float(rtf) < float(maximum), f"OmniInteract mean_audio_rtf {rtf} is not below {maximum}"
+
+
 def _maybe_assert_aggregate_ia_qtf1(params: dict[str, object], acc_summary: dict[str, object]) -> None:
     min_ia_qtf1 = params.get(_OMNIINTERACT_AGGREGATE_MIN_IA_QTF1)
     if min_ia_qtf1 is None:
@@ -760,6 +775,7 @@ def assert_result(result, params, num_prompt) -> None:
             _assert_omniinteract_paq_floor(params, acc_summary)
             _assert_omniinteract_csm_as_ceiling(params, acc_summary)
             _maybe_assert_aggregate_ia_qtf1(params, acc_summary)
+        _assert_omniinteract_audio_rtf_ceiling(result, params)
     baseline = params.get("baseline")
     hardware = result.get("Hardware")
     hardware_baseline = baseline.get(hardware) if isinstance(baseline, dict) and isinstance(hardware, str) else None
