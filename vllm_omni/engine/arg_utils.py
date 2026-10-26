@@ -7,7 +7,7 @@ import os
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.logger import init_logger
@@ -270,6 +270,9 @@ class OmniEngineArgs(EngineArgs):
         async_chunk: If set to True, perform async chunk
         session_mode: Request lifecycle mode, either turn-based or duplex
         worker_type: Model Type, e.g., "ar" or "generation"
+        scheduling_metadata_adapter: Optional dotted path of a runner-side
+            adapter that translates incoming payload metadata into typed
+            scheduler-visible updates. If None, the default adapter is used.
         task_type: Model-defined startup task type. Consumers validate the
             supported values and decide whether it selects request behavior,
             task-specific weights, or both.
@@ -303,6 +306,7 @@ class OmniEngineArgs(EngineArgs):
     retains_state_across_chunks: bool = False
     supports_pending_generation: bool = False
     supports_running_prefix_cache_reset: bool = True
+    recompute_preemption: Literal["allow", "fail"] = "allow"
     use_v2_model_runner: bool = False
     supports_native_mrv2_data_plane: bool = False
     # WS-A: Stage-1 active stream slots. 0 = legacy preempt-everything.
@@ -316,6 +320,7 @@ class OmniEngineArgs(EngineArgs):
     quantization_config: Any | None = None
     force_cutlass_fp8: bool | None = None
     worker_type: str | None = None
+    scheduling_metadata_adapter: str | None = None
     # Dotted path of a per-stage pooling-output decoder applied worker-side.
     pooling_output_decoder: str | None = None
     task_type: str | None = None
@@ -332,6 +337,27 @@ class OmniEngineArgs(EngineArgs):
     # for library callers (#7564); registered pipelines may consume it through
     # their own stage_cli_aliases or deploy YAML.
     text_encoder_tp_size: int | None = None
+    # Diffusion parallel knobs registered by the serve CLI (``--usp``,
+    # ``--ulysses-mode``, ``--ring-degree``, ``--allgather-degree``,
+    # ``--use-hsdp``, ``--hsdp-*``, ``--cfg-parallel-size``,
+    # ``--vae-patch-parallel-size``, ``--vae-parallel-mode``) and consumed by
+    # ``DiffusionParallelConfig`` through the generic diffusion fallback.
+    # Declared here for the same reason as ``text_encoder_tp_size`` above:
+    # ``from_cli_args`` keeps only dataclass fields, so an undeclared knob is
+    # silently reset to its default (#7652). They are also listed in
+    # SHARED_FIELDS because this change declares them on both classes, and
+    # invariant 1 below requires the overlap to stay a subset of that set.
+    ulysses_degree: int | None = None
+    ulysses_mode: str | None = None
+    ulysses_a2a_permute: bool | None = None
+    ring_degree: int | None = None
+    allgather_degree: int | None = None
+    use_hsdp: bool | None = None
+    hsdp_shard_size: int | None = None
+    hsdp_replicate_size: int | None = None
+    cfg_parallel_size: int | None = None
+    vae_patch_parallel_size: int | None = None
+    vae_parallel_mode: str | None = None
 
     @classmethod
     def _add_omni_specific_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -543,6 +569,7 @@ class OmniEngineArgs(EngineArgs):
             retains_state_across_chunks=self.retains_state_across_chunks,
             supports_pending_generation=self.supports_pending_generation,
             supports_running_prefix_cache_reset=self.supports_running_prefix_cache_reset,
+            recompute_preemption=self.recompute_preemption,
             use_v2_model_runner=self.use_v2_model_runner,
             supports_native_mrv2_data_plane=self.supports_native_mrv2_data_plane,
             active_stream_window=self.active_stream_window,
@@ -550,6 +577,7 @@ class OmniEngineArgs(EngineArgs):
             model_stage=self.model_stage,
             model_arch=self.model_arch,
             worker_type=self.worker_type,
+            scheduling_metadata_adapter=self.scheduling_metadata_adapter,
             pooling_output_decoder=self.pooling_output_decoder,
             engine_output_type=self.engine_output_type,
             final_output=self.final_output,
@@ -753,6 +781,19 @@ SHARED_FIELDS: frozenset[str] = frozenset(
         "log_stats",  # both want the flag
         "async_chunk",  # orch: read from CLI, redistribute; engine: per-stage flag
         "tokenizer",  # orch: detect model type; engine: tokenization
+        # Diffusion parallel knobs: the orchestrator sizes the deployment from
+        # them, the engine forwards them to DiffusionParallelConfig.
+        "ulysses_degree",
+        "ulysses_mode",
+        "ulysses_a2a_permute",
+        "ring_degree",
+        "allgather_degree",
+        "use_hsdp",
+        "hsdp_shard_size",
+        "hsdp_replicate_size",
+        "cfg_parallel_size",
+        "vae_patch_parallel_size",
+        "vae_parallel_mode",
     }
 )
 

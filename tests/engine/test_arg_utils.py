@@ -89,8 +89,8 @@ def test_default_stage_id_is_concrete_int():
     assert cfg.stage_id == 0
 
 
-def test_full_payload_capability_reaches_omni_model_config(monkeypatch):
-    """Keep the pipeline capability intact through the engine adapter."""
+def test_topology_owned_model_fields_reach_omni_model_config(monkeypatch):
+    """Keep pipeline-owned model fields intact through the engine adapter."""
     captured: dict[str, object] = {}
     baseline_config = Mock()
     worker_module = types.ModuleType("test_connector_worker")
@@ -121,10 +121,12 @@ def test_full_payload_capability_reaches_omni_model_config(monkeypatch):
     OmniEngineArgs(
         stage_id=1,
         requires_full_payload_input=True,
+        scheduling_metadata_adapter="pipeline.Adapter",
         worker_cls="test_connector_worker.ConnectorWorker",
     ).create_model_config()
 
     assert captured["requires_full_payload_input"] is True
+    assert captured["scheduling_metadata_adapter"] == "pipeline.Adapter"
 
 
 def test_stage_without_connector_configuration_accepts_plain_runner(monkeypatch):
@@ -625,3 +627,50 @@ def test_native_mrv2_worker_provides_connector_without_legacy_mixin():
         model_runner_cls = OmniARModelRunner
 
     validate_worker_omni_connector(Worker, required=True)
+
+
+# For https://github.com/vllm-project/vllm-omni/issues/8037
+# The diffusion parallel knobs the serve CLI registers and the engine must keep
+# when engine args come from parsed CLI args. Values are not the
+# DiffusionParallelConfig defaults, so a silently reset knob fails the check.
+DIFFUSION_PARALLEL_KNBS = [
+    ("ulysses_degree", 4),
+    ("ulysses_mode", "advanced_uaa"),
+    ("ulysses_a2a_permute", True),
+    ("ring_degree", 2),
+    ("allgather_degree", 8),
+    ("use_hsdp", True),
+    ("hsdp_shard_size", 2048),
+    ("hsdp_replicate_size", 2),
+    ("cfg_parallel_size", 2),
+    ("vae_patch_parallel_size", 2),
+    ("vae_parallel_mode", "spatial_shard_height"),
+]
+
+
+# For https://github.com/vllm-project/vllm-omni/issues/8037
+def test_from_cli_args_applies_diffusion_parallel_knobs():
+    """Every CLI-registered diffusion parallel knob must survive and be applied.
+
+    ``OmniEngineArgs.from_cli_args`` keeps only dataclass fields, so a knob
+    that ``OmniEngineArgs`` does not declare was silently reset to its
+    ``DiffusionParallelConfig`` default (#7652 covered
+    ``text_encoder_tp_size`` alone). Every value in the table differs from that
+    default, so an ignored knob fails the second assertion too.
+    """
+    from vllm_omni.config.config_factory import StageConfigFactory
+
+    for knob, value in DIFFUSION_PARALLEL_KNBS:
+        engine_args = OmniEngineArgs.from_cli_args(SimpleNamespace(**{knob: value}))
+        assert getattr(engine_args, knob) == value, f"{knob} was dropped"
+
+        # Forward the preserved value rather than the table literal, so the
+        # second assertion fails if ``from_cli_args`` dropped the knob.
+        factory_kwargs = {knob: getattr(engine_args, knob)}
+        if knob == "use_hsdp":
+            # Standalone HSDP (all other parallelism at 1) cannot
+            # auto-calculate its shard size; pass one explicitly.
+            factory_kwargs["hsdp_shard_size"] = 2048
+        stage_cfg = StageConfigFactory.create_default_diffusion(factory_kwargs)[0]
+        parallel_config = stage_cfg["engine_args"]["parallel_config"]
+        assert parallel_config[knob] == value, f"{knob} did not reach parallel_config"
